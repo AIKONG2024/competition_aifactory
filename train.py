@@ -229,6 +229,26 @@ def conv2d_block(input_tensor, n_filters, kernel_size = 3, batchnorm = True):
     x = Activation("relu")(x)
     return x
 
+#Attention Gate
+def attention_gate(F_g, F_l, inter_channel):
+    # F_g: 디코더의 특징 맵 (Gating Signal)
+    # F_l: 인코더의 특징 맵
+    # inter_channel: 중간 채널 수
+
+    theta_x = Conv2D(inter_channel, (2, 2), strides=(2, 2), padding='same')(F_l)
+    phi_g = Conv2D(inter_channel, (1, 1), strides=(1, 1), padding='same')(F_g)
+
+    concat_xg = add([theta_x, phi_g])
+    act_xg = Activation('relu')(concat_xg)
+    psi = Conv2D(1, (1, 1), padding='same')(act_xg)
+    sigmoid_xg = Activation('sigmoid')(psi)
+    shape_sigmoid = K.int_shape(sigmoid_xg)
+    upsample_psi = Conv2DTranspose(1, (3, 3), strides=(shape_sigmoid[1], shape_sigmoid[2]), padding='same')(sigmoid_xg)
+
+    y = multiply([upsample_psi, F_l])
+
+    return y
+
 #UNET
 def get_unet(nClasses, input_height=256, input_width=256, n_filters = 16, dropout = 0.1, batchnorm = True, n_channels=10):
     input_img = Input(shape=(input_height,input_width, n_channels))
@@ -252,6 +272,55 @@ def get_unet(nClasses, input_height=256, input_width=256, n_filters = 16, dropou
 
     c5 = conv2d_block(p4, n_filters=n_filters*16, kernel_size=3, batchnorm=batchnorm)
 
+    # expansive path
+    u6 = Conv2DTranspose(n_filters*8, (3, 3), strides=(2, 2), padding='same') (c5)
+    u6 = concatenate([u6, c4])
+    u6 = Dropout(dropout)(u6)
+    c6 = conv2d_block(u6, n_filters=n_filters*8, kernel_size=3, batchnorm=batchnorm)
+
+    u7 = Conv2DTranspose(n_filters*4, (3, 3), strides=(2, 2), padding='same') (c6)
+    u7 = concatenate([u7, c3])
+    u7 = Dropout(dropout)(u7)
+    c7 = conv2d_block(u7, n_filters=n_filters*4, kernel_size=3, batchnorm=batchnorm)
+
+    u8 = Conv2DTranspose(n_filters*2, (3, 3), strides=(2, 2), padding='same') (c7)
+    u8 = concatenate([u8, c2])
+    u8 = Dropout(dropout)(u8)
+    c8 = conv2d_block(u8, n_filters=n_filters*2, kernel_size=3, batchnorm=batchnorm)
+
+    u9 = Conv2DTranspose(n_filters*1, (3, 3), strides=(2, 2), padding='same') (c8)
+    u9 = concatenate([u9, c1], axis=3)
+    u9 = Dropout(dropout)(u9)
+    c9 = conv2d_block(u9, n_filters=n_filters*1, kernel_size=3, batchnorm=batchnorm)
+
+    outputs = Conv2D(nClasses, (1, 1), activation='sigmoid') (c9)
+    model = Model(inputs=[input_img], outputs=[outputs])
+    return model
+
+#UNET
+def get__attention_unet(nClasses, input_height=256, input_width=256, n_filters = 16, dropout = 0.1, batchnorm = True, n_channels=10):
+    input_img = Input(shape=(input_height,input_width, n_channels))
+
+    # contracting path
+    c1 = conv2d_block(input_img, n_filters=n_filters*1, kernel_size=3, batchnorm=batchnorm)
+    p1 = MaxPooling2D((2, 2)) (c1)
+    p1 = Dropout(dropout)(p1)
+
+    c2 = conv2d_block(p1, n_filters=n_filters*2, kernel_size=3, batchnorm=batchnorm)
+    p2 = MaxPooling2D((2, 2)) (c2)
+    p2 = Dropout(dropout)(p2)
+
+    c3 = conv2d_block(p2, n_filters=n_filters*4, kernel_size=3, batchnorm=batchnorm)
+    p3 = MaxPooling2D((2, 2)) (c3)
+    p3 = Dropout(dropout)(p3)
+
+    c4 = conv2d_block(p3, n_filters=n_filters*8, kernel_size=3, batchnorm=batchnorm)
+    p4 = MaxPooling2D(pool_size=(2, 2)) (c4)
+    p4 = Dropout(dropout)(p4)
+    
+    attention5 = attention_gate(F_g=u6, F_l=c4, inter_channel=c4.get_shape().as_list()[-1] // 2)
+    c5 = conv2d_block(attention5, n_filters=n_filters*8, kernel_size=3, batchnorm=batchnorm)
+    
     # expansive path
     u6 = Conv2DTranspose(n_filters*8, (3, 3), strides=(2, 2), padding='same') (c5)
     u6 = concatenate([u6, c4])
