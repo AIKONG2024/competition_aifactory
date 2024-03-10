@@ -319,15 +319,16 @@ def get__attention_unet(nClasses, input_height=256, input_width=256, n_filters =
     c4 = conv2d_block(p3, n_filters=n_filters*8, kernel_size=3, batchnorm=batchnorm)
     p4 = MaxPooling2D(pool_size=(2, 2)) (c4)
     p4 = Dropout(dropout)(p4)
-    
-    attention5 = attention_gate(F_g=u6, F_l=c4)
-    c5 = conv2d_block(attention5, n_filters=n_filters*8, kernel_size=3, batchnorm=batchnorm)
-    
-    # expansive path
+
+    c5 = conv2d_block(p4, n_filters=n_filters*16, kernel_size=3, batchnorm=batchnorm)
+
     u6 = Conv2DTranspose(n_filters*8, (3, 3), strides=(2, 2), padding='same') (c5)
-    u6 = concatenate([u6, c4])
-    u6 = Dropout(dropout)(u6)
-    c6 = conv2d_block(u6, n_filters=n_filters*8, kernel_size=3, batchnorm=batchnorm)
+
+    attention5 = attention_gate(F_g=u6, F_l=c4, inter_channel=n_filters*4)
+    
+    u6_attention = concatenate([attention5, u6])
+    u6_attention = Dropout(dropout)(u6_attention)
+    c6 = conv2d_block(u6_attention, n_filters=n_filters*8, kernel_size=3, batchnorm=batchnorm)
 
     u7 = Conv2DTranspose(n_filters*4, (3, 3), strides=(2, 2), padding='same') (c6)
     u7 = concatenate([u7, c3])
@@ -481,9 +482,9 @@ def get_model(model_name, nClasses=1, input_height=128, input_width=128, n_filte
         model = get_efficientunet_b7
     elif model_name == 'unet':
         model =  get_unet
-    elif model == 'deeplabv3+':
+    elif model_name == 'deeplabv3+':
         model = get_deeplabv3plus
-    elif model == 'attention_unet':
+    elif model_name == 'attention_unet':
         model = get__attention_unet
         
     return model(
