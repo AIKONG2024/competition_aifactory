@@ -32,7 +32,7 @@ from sklearn.model_selection import train_test_split
 import joblib
 import time
 from keras.callbacks import Callback
-import tensorflow_hub as hub
+# import tensorflow_hub as hub
 import cv2
 
 #랜럼시드 고정
@@ -48,7 +48,6 @@ EPOCHS = 120 # 훈련 epoch 지정
 BATCH_SIZE = 128 # batch size 지정
 IMAGE_SIZE = (256, 256) # 이미지 크기 지정
 MODEL_NAME = 'unet' # 모델 이름
-# RANDOM_STATE = 42 # seed 고정
 INITIAL_EPOCH = 0 # 초기 epoch
 
 # 프로젝트 이름
@@ -124,6 +123,7 @@ def threadsafe_generator(f):
 
     return g
 
+############################################################이미지 전처리#########################################################
 def get_img_arr(path, bands):
     if len(bands) > 0 :
         img = rasterio.open(path).read(bands).transpose((1, 2, 0))
@@ -199,7 +199,7 @@ def generator_from_lists(images_path, masks_path, batch_size=32, shuffle = True,
             #대비조절
             img = np.uint8(img * 255)  # 이미지를 8-bit 정수 타입으로 변환
             img = enhance_image_contrast(img)
-            img = img.astype(np.float32) / .255 #다시 32 float 타입 변환
+            img = img.astype(np.float32) / 255. #다시 32 float 타입 변환
             
             images.append(img)
             masks.append(mask)
@@ -398,7 +398,7 @@ def get_efficientunet_b7(nClasses, input_height=256, input_width=256, n_filters 
 def get_deeplabv3plus():
     model_url = "https://tfhub.dev/tensorflow/deeplabv3/1"
     model = Sequential([
-        hub.KerasLayer(model_url, output_shape=[256, 256, 3], input_shape=(256, 256, 3))
+        # hub.KerasLayer(model_url, output_shape=[256, 256, 3], input_shape=(256, 256, 3))
     ])
 
 def get_model(model_name, nClasses=1, input_height=128, input_width=128, n_filters = 16, dropout = 0.1, batchnorm = True, n_channels=10):
@@ -424,7 +424,7 @@ def get_model(model_name, nClasses=1, input_height=128, input_width=128, n_filte
         )
 
 ################################### metrics ########################################
-# 두 샘플 간의 유사성 metric
+# dice score metric
 def dice_coef(y_true, y_pred, smooth=1):
     intersection = tf.reduce_sum(y_true * y_pred, axis=[1, 2, 3])
     union = tf.reduce_sum(y_true, axis=[1, 2, 3]) + tf.reduce_sum(y_pred, axis=[1, 2, 3])
