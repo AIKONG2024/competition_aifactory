@@ -275,7 +275,7 @@ def FCN(nClasses, input_height=128, input_width=128, n_filters = 16, dropout = 0
     f2 = x
 
     # Out
-    o = (Conv2D(nClasses, (3,3), activation='relu' , padding='same', name="Out"))(x)
+    o = (Conv2D(nClasses, (3,3), activation='sigmoid' , padding='same', name="Out"))(x)
 
     model = Model(img_input, o)
 
@@ -678,80 +678,8 @@ class Recall(tf.keras.metrics.Metric):
 class mAP(tf.keras.metrics.AUC):
     def __init__(self, name='mAP', **kwargs):
         super(mAP, self).__init__(name=name, curve='PR', **kwargs)
+        
 
-#threshold 비교용 custom metric
-class ThresholdMetricsCallback(Callback):
-    def __init__(self, validation_data, thresholds=[0.25, 0.5, 0.75]):
-        super(ThresholdMetricsCallback, self).__init__()
-        self.validation_data = validation_data
-        self.thresholds = thresholds
-
-    def on_epoch_end(self, epoch, logs=None):
-        logs = logs or {}
-        val_data_gen = self.validation_data
-        val_steps = self.validation_steps  # 검증 스텝 수를 지정해야 함
-
-        # 각 임계치에 대해 평가
-        for threshold in self.thresholds:
-            precision_values = []
-            recall_values = []
-            mAP_values = []
-            miou_values = []
-            pixel_accuracy_values = []
-            dice_coef_values = []
-
-
-            # 제너레이터에서 데이터 가져오기
-            for step in range(val_steps):
-                x_val, y_val = next(val_data_gen)
-                y_pred = self.model.predict(x_val)
-
-                y_pred_thresholded = tf.cast(y_pred > threshold, tf.float32)
-
-                # Precision
-                precision = tf.keras.metrics.Precision()
-                precision.update_state(y_val, y_pred_thresholded)
-                precision_values.append(precision.result().numpy())
-
-                # Recall
-                recall = tf.keras.metrics.Recall()
-                recall.update_state(y_val, y_pred_thresholded)
-                recall_values.append(recall.result().numpy())
-
-                # mAP (AUC-PR)
-                mAP_metric = tf.keras.metrics.AUC(curve='PR')
-                mAP_metric.update_state(y_val, y_pred)
-                mAP_values.append(mAP_metric.result().numpy())
-                
-                # miou
-                miou_value = miou(y_val, y_pred_thresholded)
-                miou_values.append(miou_value)
-
-                # pixel_accuracy
-                pixel_accuracy_value = pixel_accuracy(y_val, y_pred_thresholded)
-                pixel_accuracy_values.append(pixel_accuracy_value)
-
-                # dice_coef
-                dice_coef_value = dice_coef(y_val, y_pred_thresholded)
-                dice_coef_values.append(dice_coef_value)
-
-        # 평균 값을 로그에 기록
-        avg_precision = np.mean(precision_values)
-        avg_recall = np.mean(recall_values)
-        avg_mAP = np.mean(mAP_values)
-        avg_miou = np.mean(miou_values)
-        avg_pixel_accuracy = np.mean(pixel_accuracy_values)
-        avg_dice_coef = np.mean(dice_coef_values)
-
-        logs[f'val_threshold_{threshold}_precision'] = avg_precision
-        logs[f'val_threshold_{threshold}_recall'] = avg_recall
-        logs[f'val_threshold_{threshold}_mAP'] = avg_mAP
-        logs[f'val_threshold_{threshold}_miou'] = avg_miou
-        logs[f'val_threshold_{threshold}_pixel_accuracy'] = avg_pixel_accuracy
-        logs[f'val_threshold_{threshold}_dice_coef'] = avg_dice_coef
-
-        # 로그에 결과 출력
-        print(f'Epoch {epoch + 1}, Threshold: {threshold}, Precision: {avg_precision}, Recall: {avg_recall}, mAP: {avg_mAP}, mIoU: {avg_miou}, Pixel Accuracy: {avg_pixel_accuracy}, Dice Coef: {avg_dice_coef}')
 
 ###################################################################################
 
@@ -851,14 +779,14 @@ validation_generator = generator_from_lists(images_validation, masks_validation,
 # model 불러오기
 model = get_model(MODEL_NAME, input_height=IMAGE_SIZE[0], input_width=IMAGE_SIZE[1], n_filters=N_FILTERS, n_channels=N_CHANNELS)
 model.compile(optimizer = Adam(), loss = 'binary_crossentropy', metrics = ['accuracy', dice_coef, pixel_accuracy, 
-                                                                          miou])
+                                                                           Precision(), Recall(), mAP(), miou])
 model.summary()
+
 
 # checkpoint 및 조기종료 설정
 es = EarlyStopping(monitor='miou', mode='max', verbose=1, patience=EARLY_STOP_PATIENCE, restore_best_weights=True)
 checkpoint = ModelCheckpoint(os.path.join(OUTPUT_DIR, CHECKPOINT_MODEL_NAME), monitor='miou', verbose=1,
 save_best_only=True, mode='max', period=CHECKPOINT_PERIOD)
-
 
 
 print('---model 훈련 시작---')
