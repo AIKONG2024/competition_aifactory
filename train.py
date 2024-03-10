@@ -229,6 +229,26 @@ def conv2d_block(input_tensor, n_filters, kernel_size = 3, batchnorm = True):
     x = Activation("relu")(x)
     return x
 
+#Attention Gate
+def attention_gate(F_g, F_l, inter_channel):
+    # F_g: Gating signal from decoder path
+    # F_l: Feature map from encoder path
+    # inter_channel: Number of intermediate channels
+    
+    # Getting the gating signal to the same dimension as the layer from the encoder path
+    F_g_conv = Conv2D(filters=inter_channel, kernel_size=1, strides=1, padding='same')(F_g)
+    F_l_conv = Conv2D(filters=inter_channel, kernel_size=1, strides=1, padding='same')(F_l)
+    
+    # Adding the upsampled gating signal and the feature map
+    F_add = add([F_g_conv, F_l_conv])
+    F_relu = Activation("relu")(F_add)
+    F_attention = Conv2D(filters=1, kernel_size=1, strides=1, padding='same')(F_relu)
+    F_attention = Activation("sigmoid")(F_attention)
+    
+    # Multiplying the attention coefficients with the input feature map
+    F_mul = multiply([F_attention, F_l])
+    return F_mul
+
 #UNET
 def get_unet(nClasses, input_height=256, input_width=256, n_filters = 16, dropout = 0.1, batchnorm = True, n_channels=10):
     input_img = Input(shape=(input_height,input_width, n_channels))
@@ -253,10 +273,64 @@ def get_unet(nClasses, input_height=256, input_width=256, n_filters = 16, dropou
     c5 = conv2d_block(p4, n_filters=n_filters*16, kernel_size=3, batchnorm=batchnorm)
 
     # expansive path
-    u6 = Conv2DTranspose(n_filters*8, (3, 3), strides=(2, 2), padding='same') (c5)
-    u6 = concatenate([u6, c4])
+    u6 = Conv2DTranspose(n_filters * 8, (3, 3), strides=(2, 2), padding='same')(c5)
     u6 = Dropout(dropout)(u6)
-    c6 = conv2d_block(u6, n_filters=n_filters*8, kernel_size=3, batchnorm=batchnorm)
+    a6 = attention_gate(F_g=u6, F_l=c4, inter_channel=n_filters * 8 // 2)
+    u6 = concatenate([u6, a6])
+    c6 = conv2d_block(u6, n_filters * 8, kernel_size=3, batchnorm=batchnorm)
+    
+    u7 = Conv2DTranspose(n_filters * 4, (3, 3), strides=(2, 2), padding='same')(c6)
+    u7 = Dropout(dropout)(u7)
+    a7 = attention_gate(F_g=u7, F_l=c3, inter_channel=n_filters * 4 // 2)
+    u7 = concatenate([u7, a7])
+    c7 = conv2d_block(u7, n_filters * 4, kernel_size=3, batchnorm=batchnorm)
+    
+    u8 = Conv2DTranspose(n_filters * 2, (3, 3), strides=(2, 2), padding='same')(c7)
+    u8 = Dropout(dropout)(u8)
+    a8 = attention_gate(F_g=u8, F_l=c2, inter_channel=n_filters * 2 // 2)
+    u8 = concatenate([u8, a8])
+    c8 = conv2d_block(u8, n_filters * 2, kernel_size=3, batchnorm=batchnorm)
+    
+    u9 = Conv2DTranspose(n_filters * 1, (3, 3), strides=(2, 2), padding='same')(c8)
+    u9 = Dropout(dropout)(u9)
+    a9 = attention_gate(F_g=u9, F_l=c1, inter_channel=n_filters * 1 // 2)
+    u9 = concatenate([u9, a9])
+    c9 = conv2d_block(u9, n_filters * 1, kernel_size=3, batchnorm=batchnorm)
+
+    outputs = Conv2D(nClasses, (1, 1), activation='sigmoid') (c9)
+    model = Model(inputs=[input_img], outputs=[outputs])
+    return model
+
+#UNET With Attention
+def get__attention_unet(nClasses, input_height=256, input_width=256, n_filters = 16, dropout = 0.1, batchnorm = True, n_channels=10):
+    input_img = Input(shape=(input_height,input_width, n_channels))
+
+    # contracting path
+    c1 = conv2d_block(input_img, n_filters=n_filters*1, kernel_size=3, batchnorm=batchnorm)
+    p1 = MaxPooling2D((2, 2)) (c1)
+    p1 = Dropout(dropout)(p1)
+
+    c2 = conv2d_block(p1, n_filters=n_filters*2, kernel_size=3, batchnorm=batchnorm)
+    p2 = MaxPooling2D((2, 2)) (c2)
+    p2 = Dropout(dropout)(p2)
+
+    c3 = conv2d_block(p2, n_filters=n_filters*4, kernel_size=3, batchnorm=batchnorm)
+    p3 = MaxPooling2D((2, 2)) (c3)
+    p3 = Dropout(dropout)(p3)
+
+    c4 = conv2d_block(p3, n_filters=n_filters*8, kernel_size=3, batchnorm=batchnorm)
+    p4 = MaxPooling2D(pool_size=(2, 2)) (c4)
+    p4 = Dropout(dropout)(p4)
+
+    c5 = conv2d_block(p4, n_filters=n_filters*16, kernel_size=3, batchnorm=batchnorm)
+
+    u6 = Conv2DTranspose(n_filters*8, (3, 3), strides=(2, 2), padding='same') (c5)
+
+    attention5 = attention_gate(F_g=u6, F_l=c4, inter_channel=n_filters*4)
+    
+    u6_attention = concatenate([attention5, u6])
+    u6_attention = Dropout(dropout)(u6_attention)
+    c6 = conv2d_block(u6_attention, n_filters=n_filters*8, kernel_size=3, batchnorm=batchnorm)
 
     u7 = Conv2DTranspose(n_filters*4, (3, 3), strides=(2, 2), padding='same') (c6)
     u7 = concatenate([u7, c3])
@@ -410,8 +484,10 @@ def get_model(model_name, nClasses=1, input_height=128, input_width=128, n_filte
         model = get_efficientunet_b7
     elif model_name == 'unet':
         model =  get_unet
-    elif model == 'deeplabv3+':
+    elif model_name == 'deeplabv3+':
         model = get_deeplabv3plus
+    elif model_name == 'attention_unet':
+        model = get__attention_unet
         
     return model(
             nClasses      = nClasses,
