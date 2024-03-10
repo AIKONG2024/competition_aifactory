@@ -42,7 +42,7 @@ np.random.seed(RANDOM_STATE)
 
 MAX_PIXEL_VALUE = 65535 # 이미지 정규화를 위한 픽셀 최대값
 
-N_FILTERS = 4 # 필터수 지정
+N_FILTERS = 32 # 필터수 지정
 N_CHANNELS = 3 # channel 지정
 EPOCHS = 200 # 훈련 epoch 지정
 BATCH_SIZE = 16 # batch size 지정

@@ -55,6 +55,7 @@ EPOCHS = 30 # 훈련 epoch 지정
 BATCH_SIZE = 64 # batch size 지정
 IMAGE_SIZE = (256, 256) # 이미지 크기 지정
 INITIAL_EPOCH = 0 # 초기 epoch
+THESHOLDS = 0.25
 
 # 데이터 위치
 IMAGES_PATH = 'datasets/train_img/'
@@ -268,13 +269,13 @@ for idx, i in enumerate(test_meta['test_img']):
     img = get_img_arr(f'datasets/test_img/{i}', (7,6,8)) 
     y_pred = model.predict(np.array([img]), batch_size=32)
 
-    y_pred = np.where(y_pred[0, :, :, 0] >= 0.5, 1, 0) # 임계값 처리
+    y_pred = np.where(y_pred[0, :, :, 0] > THESHOLDS, 1, 0) # 임계값 처리
     y_pred = y_pred.astype(np.uint8)
     y_pred_dict[i] = y_pred
-    plt.figure(figsize=(10,10))
-    plt.imshow(y_pred)
-    plt.show()
+    # plt.figure(figsize=(10,10))
+    # plt.imshow(y_pred)
+    # plt.show()
 
-# joblib.dump(y_pred_dict, )
-# joblib.dump(y_pred_dict, f'predict/{WEIGHT_NAME}_y_pred.pkl')
-# print("저장된 pkl:", f'predict/{WEIGHT_NAME}_y_pred.pkl')
+joblib.dump(y_pred_dict, )
+joblib.dump(y_pred_dict, f'predict/{WEIGHT_NAME}_y_pred.pkl')
+print("저장된 pkl:", f'predict/{WEIGHT_NAME}_y_pred.pkl')

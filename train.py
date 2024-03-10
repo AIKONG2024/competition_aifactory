@@ -32,6 +32,7 @@ from sklearn.model_selection import train_test_split
 import joblib
 import time
 from keras.callbacks import Callback
+from sklearn.metrics import precision_score, recall_score, precision_recall_curve ,auc
 # import tensorflow_hub as hub
 import cv2
 
@@ -42,13 +43,14 @@ np.random.seed(RANDOM_STATE)
 
 MAX_PIXEL_VALUE = 65535 # 이미지 정규화를 위한 픽셀 최대값
 
-N_FILTERS = 16 # 필터수 지정
+N_FILTERS = 64 # 필터수 지정
 N_CHANNELS = 3 # channel 지정
 EPOCHS = 120 # 훈련 epoch 지정
-BATCH_SIZE = 128 # batch size 지정
+BATCH_SIZE = 16 # batch size 지정
 IMAGE_SIZE = (256, 256) # 이미지 크기 지정
 MODEL_NAME = 'unet' # 모델 이름
 INITIAL_EPOCH = 0 # 초기 epoch
+THESHOLDS = 0.25
 
 # 프로젝트 이름
 import time
@@ -102,7 +104,13 @@ class CometLogger(Callback):
             'pixel_accuracy': logs['pixel_accuracy'],
             'val_pixel_accuracy': logs['val_pixel_accuracy'],
             'miou': logs['miou'],
-            'val_miou': logs['val_miou']
+            'val_miou': logs['val_miou'],
+            'precision': logs['precision'],
+            'recall': logs['recall'],
+            'val_precision': logs['val_precision'],
+            'val_recall': logs['val_recall'],
+            'mAP': logs['mAP'],
+            'val_mAP': logs['val_mAP']
         })
 
 class threadsafe_iter:
@@ -197,10 +205,11 @@ def generator_from_lists(images_path, masks_path, batch_size=32, shuffle = True,
             img = fopen_image(img_path, bands=(7,6,8))
             mask = fopen_mask(mask_path)
             
-            #대비조절
+            # #대비조절
             img = np.uint8(img * 255)  # 이미지를 8-bit 정수 타입으로 변환
             img = enhance_image_contrast(img)
             img = img.astype(np.float32) / 255. #다시 32 float 타입 변환
+            
             
             images.append(img)
             masks.append(mask)
@@ -502,7 +511,7 @@ def get_model(model_name, nClasses=1, input_height=128, input_width=128, n_filte
 
 ################################### metrics ########################################
 # dice score metric
-def dice_coef(y_true, y_pred, smooth=1):
+def dice_coef(y_true, y_pred, smooth=1e-6):
     intersection = tf.reduce_sum(y_true * y_pred, axis=[1, 2, 3])
     union = tf.reduce_sum(y_true, axis=[1, 2, 3]) + tf.reduce_sum(y_pred, axis=[1, 2, 3])
     dice = tf.reduce_mean((2. * intersection + smooth) / (union + smooth), axis=0)
@@ -510,8 +519,8 @@ def dice_coef(y_true, y_pred, smooth=1):
 
 # 픽셀 정확도 metric
 def pixel_accuracy(y_true, y_pred):
-    # 예측값을 0.5 기준으로 이진화
-    y_pred = tf.cast(y_pred > 0.5, tf.float32)
+    # 임계치 기준으로 이진화
+    y_pred = tf.cast(y_pred > THESHOLDS, tf.float32)
     
     # 논리적 AND 연산으로 정확한 예측의 수를 계산
     correct_prediction = tf.logical_and(tf.equal(y_pred, 1), tf.equal(y_true, 1))
@@ -527,8 +536,8 @@ def pixel_accuracy(y_true, y_pred):
 
 #miou metric
 def miou(y_true, y_pred, smooth=1e-6):
-    # 임계치 0.5 기준으로 이진화
-    y_pred = tf.cast(y_pred > 0.5, tf.float32)
+    # 임계치 기준으로 이진화
+    y_pred = tf.cast(y_pred > THESHOLDS, tf.float32)
     
     intersection = tf.reduce_sum(y_true * y_pred, axis=[1, 2, 3])
     union = tf.reduce_sum(y_true, axis=[1, 2, 3]) + tf.reduce_sum(y_pred, axis=[1, 2, 3]) - intersection
@@ -537,6 +546,98 @@ def miou(y_true, y_pred, smooth=1e-6):
     iou = (intersection + smooth) / (union + smooth)
     miou = tf.reduce_mean(iou)
     return miou
+
+#precision metric
+class Precision(tf.keras.metrics.Metric):
+    def __init__(self, name='precision', **kwargs):
+        super().__init__(name=name, **kwargs)
+        self.true_positives = self.add_weight(name='tp', initializer='zeros')
+        self.predicted_positives = self.add_weight(name='pp', initializer='zeros')
+
+    def update_state(self, y_true, y_pred, sample_weight=None):
+        y_pred = tf.round(y_pred)
+        true_positives = tf.reduce_sum(tf.cast(y_true * y_pred, tf.float32))
+        predicted_positives = tf.reduce_sum(y_pred)
+        
+        self.true_positives.assign_add(true_positives)
+        self.predicted_positives.assign_add(predicted_positives)
+
+    def result(self):
+        precision = self.true_positives / (self.predicted_positives + tf.keras.backend.epsilon())
+        return precision
+
+    def reset_states(self):
+        self.true_positives.assign(0)
+        self.predicted_positives.assign(0)
+        
+#recall metric
+class Recall(tf.keras.metrics.Metric):
+    def __init__(self, name='recall', **kwargs):
+        super().__init__(name=name, **kwargs)
+        self.true_positives = self.add_weight(name='tp', initializer='zeros')
+        self.actual_positives = self.add_weight(name='ap', initializer='zeros')
+
+    def update_state(self, y_true, y_pred, sample_weight=None):
+        y_pred = tf.round(y_pred)
+        true_positives = tf.reduce_sum(tf.cast(y_true * y_pred, tf.float32))
+        actual_positives = tf.reduce_sum(y_true)
+        
+        self.true_positives.assign_add(true_positives)
+        self.actual_positives.assign_add(actual_positives)
+
+    def result(self):
+        recall = self.true_positives / (self.actual_positives + tf.keras.backend.epsilon())
+        return recall
+
+    def reset_states(self):
+        self.true_positives.assign(0)
+        self.actual_positives.assign(0)
+
+#mAP metric
+class mAP(tf.keras.metrics.AUC):
+    def __init__(self, name='mAP', **kwargs):
+        super(mAP, self).__init__(name=name, curve='PR', **kwargs)
+
+#threshold 비교용 custom metric
+class ThresholdMetricsCallback(Callback):
+    def __init__(self, validation_data, thresholds=[0.25, 0.5, 0.75]):
+        super(ThresholdMetricsCallback, self).__init__()
+        self.validation_data = validation_data
+        self.thresholds = thresholds
+
+    def on_epoch_end(self, epoch, logs=None):
+        logs = logs or {}
+        x_val, y_val = self.validation_data
+        y_pred = self.model.predict(x_val)
+        
+        for threshold in self.thresholds:
+            y_pred_thresholded = tf.cast(y_pred > threshold, tf.float32)
+            
+            # Precision
+            precision = tf.keras.metrics.Precision()
+            precision.update_state(y_val, y_pred_thresholded)
+            precision_value = precision.result().numpy()
+            logs[f'val_threshold_{threshold}_precision'] = precision_value
+            
+            # Recall
+            recall = tf.keras.metrics.Recall()
+            recall.update_state(y_val, y_pred_thresholded)
+            recall_value = recall.result().numpy()
+            logs[f'val_threshold_{threshold}_recall'] = recall_value
+            
+            # mAP (AUC-PR)
+            mAP_metric = tf.keras.metrics.AUC(curve='PR')
+            mAP_metric.update_state(y_val, y_pred)
+            mAP_value = mAP_metric.result().numpy()
+            logs[f'val_threshold_{threshold}_mAP'] = mAP_value
+            
+            # Comet.ml에 로그 기록
+            experiment.log_metric(f'val_threshold_{threshold}_precision', precision_value, step=epoch)
+            experiment.log_metric(f'val_threshold_{threshold}_recall', recall_value, step=epoch)
+            experiment.log_metric(f'val_threshold_{threshold}_mAP', mAP_value, step=epoch)
+            
+            # 로그에 결과 출력
+            print(f'Epoch {epoch + 1}, Threshold: {threshold}, Precision: {precision_value}, Recall: {recall_value}, mAP: {mAP_value}')
 
 ###################################################################################
 
@@ -635,14 +736,17 @@ validation_generator = generator_from_lists(images_validation, masks_validation,
 
 # model 불러오기
 model = get_model(MODEL_NAME, input_height=IMAGE_SIZE[0], input_width=IMAGE_SIZE[1], n_filters=N_FILTERS, n_channels=N_CHANNELS)
-model.compile(optimizer = Adam(), loss = 'binary_crossentropy', metrics = ['accuracy', dice_coef, pixel_accuracy, miou])
+model.compile(optimizer = Adam(), loss = 'binary_crossentropy', metrics = ['accuracy', dice_coef, pixel_accuracy, 
+                                                                          miou])
 model.summary()
 
+threshold_custom_callback = ThresholdMetricsCallback(validation_data=validation_generator, thresholds=[0.25, 0.5, 0.75])
 
 # checkpoint 및 조기종료 설정
-es = EarlyStopping(monitor='val_loss', mode='min', verbose=1, patience=EARLY_STOP_PATIENCE, restore_best_weights=True)
-checkpoint = ModelCheckpoint(os.path.join(OUTPUT_DIR, CHECKPOINT_MODEL_NAME), monitor='val_loss', verbose=1,
-save_best_only=True, mode='min', period=CHECKPOINT_PERIOD)
+es = EarlyStopping(monitor='miou', mode='max', verbose=1, patience=EARLY_STOP_PATIENCE, restore_best_weights=True)
+checkpoint = ModelCheckpoint(os.path.join(OUTPUT_DIR, CHECKPOINT_MODEL_NAME), monitor='miou', verbose=1,
+save_best_only=True, mode='max', period=CHECKPOINT_PERIOD)
+
 
 
 print('---model 훈련 시작---')
@@ -651,7 +755,7 @@ history = model.fit_generator(
     steps_per_epoch=len(images_train) // BATCH_SIZE,
     validation_data=validation_generator,
     validation_steps=len(images_validation) // BATCH_SIZE,
-    callbacks=[checkpoint, es, CometLogger()],
+    callbacks=[checkpoint, es, threshold_custom_callback, CometLogger()],
     epochs=EPOCHS,
     workers=WORKERS,
     initial_epoch=INITIAL_EPOCH
