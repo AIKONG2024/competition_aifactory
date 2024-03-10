@@ -230,26 +230,24 @@ def conv2d_block(input_tensor, n_filters, kernel_size = 3, batchnorm = True):
     return x
 
 #Attention Gate
-def attention_gate(F_g, F_l, inter_channel=None):
-    # F_g: 디코더의 특징 맵 (Gating Signal)
-    # F_l: 인코더의 특징 맵
-    # inter_channel: 중간 채널 수, 기본값으로 F_l의 채널 수의 절반을 사용
-
-    if inter_channel is None:
-        inter_channel = F_l.get_shape().as_list()[-1] // 2
-
-    theta_x = Conv2D(inter_channel, (2, 2), strides=(2, 2), padding='same')(F_l)
-    phi_g = Conv2D(inter_channel, (1, 1), strides=(1, 1), padding='same')(F_g)
-
-    concat_xg = add([theta_x, phi_g])
-    act_xg = Activation('relu')(concat_xg)
-    psi = Conv2D(1, (1, 1), padding='same')(act_xg)
-    sigmoid_xg = Activation('sigmoid')(psi)
-    upsample_psi = Conv2DTranspose(1, (2, 2), strides=(2, 2), padding='same')(sigmoid_xg)
+def attention_gate(F_g, F_l, inter_channel):
+    # F_g: Gating signal from decoder path
+    # F_l: Feature map from encoder path
+    # inter_channel: Number of intermediate channels
     
-    y = multiply([upsample_psi, F_l])
-
-    return y
+    # Getting the gating signal to the same dimension as the layer from the encoder path
+    F_g_conv = Conv2D(filters=inter_channel, kernel_size=1, strides=1, padding='same')(F_g)
+    F_l_conv = Conv2D(filters=inter_channel, kernel_size=1, strides=1, padding='same')(F_l)
+    
+    # Adding the upsampled gating signal and the feature map
+    F_add = add([F_g_conv, F_l_conv])
+    F_relu = Activation("relu")(F_add)
+    F_attention = Conv2D(filters=1, kernel_size=1, strides=1, padding='same')(F_relu)
+    F_attention = Activation("sigmoid")(F_attention)
+    
+    # Multiplying the attention coefficients with the input feature map
+    F_mul = multiply([F_attention, F_l])
+    return F_mul
 
 #UNET
 def get_unet(nClasses, input_height=256, input_width=256, n_filters = 16, dropout = 0.1, batchnorm = True, n_channels=10):
@@ -275,25 +273,29 @@ def get_unet(nClasses, input_height=256, input_width=256, n_filters = 16, dropou
     c5 = conv2d_block(p4, n_filters=n_filters*16, kernel_size=3, batchnorm=batchnorm)
 
     # expansive path
-    u6 = Conv2DTranspose(n_filters*8, (3, 3), strides=(2, 2), padding='same') (c5)
-    u6 = concatenate([u6, c4])
+    u6 = Conv2DTranspose(n_filters * 8, (3, 3), strides=(2, 2), padding='same')(c5)
     u6 = Dropout(dropout)(u6)
-    c6 = conv2d_block(u6, n_filters=n_filters*8, kernel_size=3, batchnorm=batchnorm)
-
-    u7 = Conv2DTranspose(n_filters*4, (3, 3), strides=(2, 2), padding='same') (c6)
-    u7 = concatenate([u7, c3])
+    a6 = attention_gate(F_g=u6, F_l=c4, inter_channel=n_filters * 8 // 2)
+    u6 = concatenate([u6, a6])
+    c6 = conv2d_block(u6, n_filters * 8, kernel_size=3, batchnorm=batchnorm)
+    
+    u7 = Conv2DTranspose(n_filters * 4, (3, 3), strides=(2, 2), padding='same')(c6)
     u7 = Dropout(dropout)(u7)
-    c7 = conv2d_block(u7, n_filters=n_filters*4, kernel_size=3, batchnorm=batchnorm)
-
-    u8 = Conv2DTranspose(n_filters*2, (3, 3), strides=(2, 2), padding='same') (c7)
-    u8 = concatenate([u8, c2])
+    a7 = attention_gate(F_g=u7, F_l=c3, inter_channel=n_filters * 4 // 2)
+    u7 = concatenate([u7, a7])
+    c7 = conv2d_block(u7, n_filters * 4, kernel_size=3, batchnorm=batchnorm)
+    
+    u8 = Conv2DTranspose(n_filters * 2, (3, 3), strides=(2, 2), padding='same')(c7)
     u8 = Dropout(dropout)(u8)
-    c8 = conv2d_block(u8, n_filters=n_filters*2, kernel_size=3, batchnorm=batchnorm)
-
-    u9 = Conv2DTranspose(n_filters*1, (3, 3), strides=(2, 2), padding='same') (c8)
-    u9 = concatenate([u9, c1], axis=3)
+    a8 = attention_gate(F_g=u8, F_l=c2, inter_channel=n_filters * 2 // 2)
+    u8 = concatenate([u8, a8])
+    c8 = conv2d_block(u8, n_filters * 2, kernel_size=3, batchnorm=batchnorm)
+    
+    u9 = Conv2DTranspose(n_filters * 1, (3, 3), strides=(2, 2), padding='same')(c8)
     u9 = Dropout(dropout)(u9)
-    c9 = conv2d_block(u9, n_filters=n_filters*1, kernel_size=3, batchnorm=batchnorm)
+    a9 = attention_gate(F_g=u9, F_l=c1, inter_channel=n_filters * 1 // 2)
+    u9 = concatenate([u9, a9])
+    c9 = conv2d_block(u9, n_filters * 1, kernel_size=3, batchnorm=batchnorm)
 
     outputs = Conv2D(nClasses, (1, 1), activation='sigmoid') (c9)
     model = Model(inputs=[input_img], outputs=[outputs])
