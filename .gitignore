@@ -1,3 +1,4 @@
 /datasets
 *.pkl
 config.ini
+*.zip
