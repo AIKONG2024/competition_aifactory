@@ -230,10 +230,13 @@ def conv2d_block(input_tensor, n_filters, kernel_size = 3, batchnorm = True):
     return x
 
 #Attention Gate
-def attention_gate(F_g, F_l, inter_channel):
+def attention_gate(F_g, F_l, inter_channel=None):
     # F_g: 디코더의 특징 맵 (Gating Signal)
     # F_l: 인코더의 특징 맵
-    # inter_channel: 중간 채널 수
+    # inter_channel: 중간 채널 수, 기본값으로 F_l의 채널 수의 절반을 사용
+
+    if inter_channel is None:
+        inter_channel = F_l.get_shape().as_list()[-1] // 2
 
     theta_x = Conv2D(inter_channel, (2, 2), strides=(2, 2), padding='same')(F_l)
     phi_g = Conv2D(inter_channel, (1, 1), strides=(1, 1), padding='same')(F_g)
@@ -242,9 +245,8 @@ def attention_gate(F_g, F_l, inter_channel):
     act_xg = Activation('relu')(concat_xg)
     psi = Conv2D(1, (1, 1), padding='same')(act_xg)
     sigmoid_xg = Activation('sigmoid')(psi)
-    shape_sigmoid = K.int_shape(sigmoid_xg)
-    upsample_psi = Conv2DTranspose(1, (3, 3), strides=(shape_sigmoid[1], shape_sigmoid[2]), padding='same')(sigmoid_xg)
-
+    upsample_psi = Conv2DTranspose(1, (2, 2), strides=(2, 2), padding='same')(sigmoid_xg)
+    
     y = multiply([upsample_psi, F_l])
 
     return y
@@ -297,7 +299,7 @@ def get_unet(nClasses, input_height=256, input_width=256, n_filters = 16, dropou
     model = Model(inputs=[input_img], outputs=[outputs])
     return model
 
-#UNET
+#UNET With Attention
 def get__attention_unet(nClasses, input_height=256, input_width=256, n_filters = 16, dropout = 0.1, batchnorm = True, n_channels=10):
     input_img = Input(shape=(input_height,input_width, n_channels))
 
@@ -318,7 +320,7 @@ def get__attention_unet(nClasses, input_height=256, input_width=256, n_filters =
     p4 = MaxPooling2D(pool_size=(2, 2)) (c4)
     p4 = Dropout(dropout)(p4)
     
-    attention5 = attention_gate(F_g=u6, F_l=c4, inter_channel=c4.get_shape().as_list()[-1] // 2)
+    attention5 = attention_gate(F_g=u6, F_l=c4)
     c5 = conv2d_block(attention5, n_filters=n_filters*8, kernel_size=3, batchnorm=batchnorm)
     
     # expansive path
@@ -481,6 +483,8 @@ def get_model(model_name, nClasses=1, input_height=128, input_width=128, n_filte
         model =  get_unet
     elif model == 'deeplabv3+':
         model = get_deeplabv3plus
+    elif model == 'attention_unet':
+        model = get__attention_unet
         
     return model(
             nClasses      = nClasses,
