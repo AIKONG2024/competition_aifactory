@@ -92,6 +92,7 @@ experiment.set_name(f'{MODEL_NAME}_{save_name}')
 class CometLogger(Callback):
     def on_epoch_end(self, epoch, logs={}):
         experiment.log_metrics({
+            'epoch': epoch,
             'loss': logs['loss'],
             'val_loss': logs['val_loss'],
             'accuracy': logs['accuracy'],
