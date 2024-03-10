@@ -48,7 +48,7 @@ N_CHANNELS = 3 # channel 지정
 EPOCHS = 120 # 훈련 epoch 지정
 BATCH_SIZE = 16 # batch size 지정
 IMAGE_SIZE = (256, 256) # 이미지 크기 지정
-MODEL_NAME = 'unet' # 모델 이름
+MODEL_NAME = 'fcn' # 모델 이름
 INITIAL_EPOCH = 0 # 초기 epoch
 THESHOLDS = 0.25
 
@@ -258,6 +258,80 @@ def attention_gate(F_g, F_l, inter_channel):
     # Multiplying the attention coefficients with the input feature map
     F_mul = multiply([F_attention, F_l])
     return F_mul
+
+def FCN(nClasses, input_height=128, input_width=128, n_filters = 16, dropout = 0.1, batchnorm = True, n_channels=10 ):
+
+
+    img_input = Input(shape=(input_height,input_width, n_channels))
+
+    ## Block 1
+    x = Conv2D(n_filters, (3, 3), activation='relu', padding='same', name='block1_conv1')(img_input)
+    x = Conv2D(n_filters, (3, 3), activation='relu', padding='same', name='block1_conv2')(x)
+    f1 = x
+
+    # Block 2
+    x = Conv2D(n_filters, (3, 3), activation='relu', padding='same', name='block2_conv1')(x)
+    x = Conv2D(n_filters, (3, 3), activation='relu', padding='same', name='block2_conv2')(x)
+    f2 = x
+
+    # Out
+    o = (Conv2D(nClasses, (3,3), activation='relu' , padding='same', name="Out"))(x)
+
+    model = Model(img_input, o)
+
+    return model
+
+def get_unet_small1 (nClasses, input_height=128, input_width=128, n_filters = 16, dropout = 0.1, batchnorm = True, n_channels=3):
+
+    input_img = Input(shape=(input_height,input_width, n_channels))
+
+    # Contracting Path
+    c1 = conv2d_block(input_img, n_filters * 1, kernel_size = 3, batchnorm = batchnorm)
+    p1 = MaxPooling2D((2, 2))(c1)
+    p1 = Dropout(dropout)(p1)
+
+    c2 = conv2d_block(p1, n_filters * 1, kernel_size = 3, batchnorm = batchnorm)
+    p2 = MaxPooling2D((2, 2))(c2)
+    p2 = Dropout(dropout)(p2)
+
+    c3 = conv2d_block(p2, n_filters = n_filters * 2, kernel_size = 3, batchnorm = batchnorm)
+
+    # Expansive Path
+    u8 = Conv2DTranspose(n_filters * 2, (3, 3), strides = (2, 2), padding = 'same')(c3)
+    u8 = concatenate([u8, c2])
+    u8 = Dropout(dropout)(u8)
+    c8 = conv2d_block(u8, n_filters * 1, kernel_size = 3, batchnorm = batchnorm)
+
+    u9 = Conv2DTranspose(n_filters * 1, (3, 3), strides = (2, 2), padding = 'same')(c8)
+    u9 = concatenate([u9, c1])
+    u9 = Dropout(dropout)(u9)
+    c9 = conv2d_block(u9, n_filters * 1, kernel_size = 3, batchnorm = batchnorm)
+
+    outputs = Conv2D(nClasses, (1, 1), activation='relu')(c9)
+    model = Model(inputs=[input_img], outputs=[outputs])
+    return model
+
+
+def get_unet_small2 (nClasses, input_height=128, input_width=128, n_filters = 16, dropout = 0.1, batchnorm = True, n_channels=3):
+
+    input_img = Input(shape=(input_height,input_width, n_channels))
+
+    # Contracting Path
+    c1 = conv2d_block(input_img, n_filters * 1, kernel_size = 3, batchnorm = batchnorm)
+    p1 = MaxPooling2D((2, 2))(c1)
+    p1 = Dropout(dropout)(p1)
+
+    c2 = conv2d_block(p1, n_filters = n_filters * 4, kernel_size = 3, batchnorm = batchnorm)
+
+    # Expansive Path
+    u3 = Conv2DTranspose(n_filters * 1, (3, 3), strides = (2, 2), padding = 'same')(c2)
+    u3 = concatenate([u3, c1])
+    u3 = Dropout(dropout)(u3)
+    c3 = conv2d_block(u3, n_filters * 1, kernel_size = 3, batchnorm = batchnorm)
+
+    outputs = Conv2D(nClasses, (1, 1), activation='relu')(c3)
+    model = Model(inputs=[input_img], outputs=[outputs])
+    return model
 
 #UNET
 def get_unet(nClasses, input_height=256, input_width=256, n_filters = 16, dropout = 0.1, batchnorm = True, n_channels=10):
@@ -498,6 +572,13 @@ def get_model(model_name, nClasses=1, input_height=128, input_width=128, n_filte
         model = get_deeplabv3plus
     elif model_name == 'attention_unet':
         model = get__attention_unet
+    elif model_name == 'fcn':
+        model = FCN
+    elif model_name == 'unet_s1':
+        model = get_unet_small1
+    elif model_name == 'unet_s2':
+        model = get_unet_small2
+        
         
     return model(
             nClasses      = nClasses,
@@ -607,37 +688,70 @@ class ThresholdMetricsCallback(Callback):
 
     def on_epoch_end(self, epoch, logs=None):
         logs = logs or {}
-        x_val, y_val = self.validation_data
-        y_pred = self.model.predict(x_val)
-        
+        val_data_gen = self.validation_data
+        val_steps = self.validation_steps  # 검증 스텝 수를 지정해야 함
+
+        # 각 임계치에 대해 평가
         for threshold in self.thresholds:
-            y_pred_thresholded = tf.cast(y_pred > threshold, tf.float32)
-            
-            # Precision
-            precision = tf.keras.metrics.Precision()
-            precision.update_state(y_val, y_pred_thresholded)
-            precision_value = precision.result().numpy()
-            logs[f'val_threshold_{threshold}_precision'] = precision_value
-            
-            # Recall
-            recall = tf.keras.metrics.Recall()
-            recall.update_state(y_val, y_pred_thresholded)
-            recall_value = recall.result().numpy()
-            logs[f'val_threshold_{threshold}_recall'] = recall_value
-            
-            # mAP (AUC-PR)
-            mAP_metric = tf.keras.metrics.AUC(curve='PR')
-            mAP_metric.update_state(y_val, y_pred)
-            mAP_value = mAP_metric.result().numpy()
-            logs[f'val_threshold_{threshold}_mAP'] = mAP_value
-            
-            # Comet.ml에 로그 기록
-            experiment.log_metric(f'val_threshold_{threshold}_precision', precision_value, step=epoch)
-            experiment.log_metric(f'val_threshold_{threshold}_recall', recall_value, step=epoch)
-            experiment.log_metric(f'val_threshold_{threshold}_mAP', mAP_value, step=epoch)
-            
-            # 로그에 결과 출력
-            print(f'Epoch {epoch + 1}, Threshold: {threshold}, Precision: {precision_value}, Recall: {recall_value}, mAP: {mAP_value}')
+            precision_values = []
+            recall_values = []
+            mAP_values = []
+            miou_values = []
+            pixel_accuracy_values = []
+            dice_coef_values = []
+
+
+            # 제너레이터에서 데이터 가져오기
+            for step in range(val_steps):
+                x_val, y_val = next(val_data_gen)
+                y_pred = self.model.predict(x_val)
+
+                y_pred_thresholded = tf.cast(y_pred > threshold, tf.float32)
+
+                # Precision
+                precision = tf.keras.metrics.Precision()
+                precision.update_state(y_val, y_pred_thresholded)
+                precision_values.append(precision.result().numpy())
+
+                # Recall
+                recall = tf.keras.metrics.Recall()
+                recall.update_state(y_val, y_pred_thresholded)
+                recall_values.append(recall.result().numpy())
+
+                # mAP (AUC-PR)
+                mAP_metric = tf.keras.metrics.AUC(curve='PR')
+                mAP_metric.update_state(y_val, y_pred)
+                mAP_values.append(mAP_metric.result().numpy())
+                
+                # miou
+                miou_value = miou(y_val, y_pred_thresholded)
+                miou_values.append(miou_value)
+
+                # pixel_accuracy
+                pixel_accuracy_value = pixel_accuracy(y_val, y_pred_thresholded)
+                pixel_accuracy_values.append(pixel_accuracy_value)
+
+                # dice_coef
+                dice_coef_value = dice_coef(y_val, y_pred_thresholded)
+                dice_coef_values.append(dice_coef_value)
+
+        # 평균 값을 로그에 기록
+        avg_precision = np.mean(precision_values)
+        avg_recall = np.mean(recall_values)
+        avg_mAP = np.mean(mAP_values)
+        avg_miou = np.mean(miou_values)
+        avg_pixel_accuracy = np.mean(pixel_accuracy_values)
+        avg_dice_coef = np.mean(dice_coef_values)
+
+        logs[f'val_threshold_{threshold}_precision'] = avg_precision
+        logs[f'val_threshold_{threshold}_recall'] = avg_recall
+        logs[f'val_threshold_{threshold}_mAP'] = avg_mAP
+        logs[f'val_threshold_{threshold}_miou'] = avg_miou
+        logs[f'val_threshold_{threshold}_pixel_accuracy'] = avg_pixel_accuracy
+        logs[f'val_threshold_{threshold}_dice_coef'] = avg_dice_coef
+
+        # 로그에 결과 출력
+        print(f'Epoch {epoch + 1}, Threshold: {threshold}, Precision: {avg_precision}, Recall: {avg_recall}, mAP: {avg_mAP}, mIoU: {avg_miou}, Pixel Accuracy: {avg_pixel_accuracy}, Dice Coef: {avg_dice_coef}')
 
 ###################################################################################
 
@@ -740,8 +854,6 @@ model.compile(optimizer = Adam(), loss = 'binary_crossentropy', metrics = ['accu
                                                                           miou])
 model.summary()
 
-threshold_custom_callback = ThresholdMetricsCallback(validation_data=validation_generator, thresholds=[0.25, 0.5, 0.75])
-
 # checkpoint 및 조기종료 설정
 es = EarlyStopping(monitor='miou', mode='max', verbose=1, patience=EARLY_STOP_PATIENCE, restore_best_weights=True)
 checkpoint = ModelCheckpoint(os.path.join(OUTPUT_DIR, CHECKPOINT_MODEL_NAME), monitor='miou', verbose=1,
@@ -755,7 +867,7 @@ history = model.fit_generator(
     steps_per_epoch=len(images_train) // BATCH_SIZE,
     validation_data=validation_generator,
     validation_steps=len(images_validation) // BATCH_SIZE,
-    callbacks=[checkpoint, es, threshold_custom_callback, CometLogger()],
+    callbacks=[checkpoint, es, CometLogger()],
     epochs=EPOCHS,
     workers=WORKERS,
     initial_epoch=INITIAL_EPOCH
