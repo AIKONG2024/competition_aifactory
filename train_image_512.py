@@ -11,7 +11,7 @@ import tensorflow as tf
 import keras
 from keras.optimizers import *
 from keras.callbacks import ModelCheckpoint, EarlyStopping
-from keras.applications import EfficientNetB0,EfficientNetB2, EfficientNetB7
+from keras.applications import EfficientNetB0,EfficientNetB2, EfficientNetB7, ResNet50
 from tensorflow.python.keras import backend as K
 import sys
 import pandas as pd
@@ -33,8 +33,11 @@ import joblib
 import time
 from keras.callbacks import Callback
 from sklearn.metrics import precision_score, recall_score, precision_recall_curve ,auc
-# import tensorflow_hub as hub
+import tensorflow_hub as hub
 import cv2
+import keras
+from keras import layers
+from skimage.transform import resize
 
 #랜럼시드 고정
 RANDOM_STATE = 42 # seed 고정
@@ -43,12 +46,12 @@ np.random.seed(RANDOM_STATE)
 
 MAX_PIXEL_VALUE = 65535 # 이미지 정규화를 위한 픽셀 최대값
 
-N_FILTERS = 64 # 필터수 지정
+N_FILTERS = 32 # 필터수 지정
 N_CHANNELS = 3 # channel 지정
-EPOCHS = 300 # 훈련 epoch 지정
-BATCH_SIZE = 16 # batch size 지정
+EPOCHS = 100 # 훈련 epoch 지정
+BATCH_SIZE = 4 # batch size 지정
 IMAGE_SIZE = (256, 256) # 이미지 크기 지정
-MODEL_NAME = 'fcn' # 모델 이름
+MODEL_NAME = 'unet' # 모델 이름
 INITIAL_EPOCH = 0 # 초기 epoch
 THESHOLDS = 0.25
 
@@ -63,10 +66,10 @@ MASKS_PATH = 'datasets/train_mask/'
 
 # 가중치 저장 위치
 OUTPUT_DIR = f'datasets/train_output/{save_name}/'
-WORKERS = 15
+WORKERS = 24
 
 # 조기종료
-EARLY_STOP_PATIENCE = 40
+EARLY_STOP_PATIENCE = 7
 
 # 중간 가중치 저장 이름
 CHECKPOINT_PERIOD = 1
@@ -138,7 +141,7 @@ def get_img_arr(path, bands):
         img = rasterio.open(path).read(bands).transpose((1, 2, 0))
     else:
         img = rasterio.open(path).read().transpose((1, 2, 0))
-    img = np.float32(img)/MAX_PIXEL_VALUE
+    img = np.float32(img) / MAX_PIXEL_VALUE
     return img
 
 def get_mask_arr(path):
@@ -161,7 +164,7 @@ def get_image_data_gen():
 #색채 대비
 def enhance_image_contrast(image):
     # CLAHE 객체 생성
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
     
     # 이미지를 LAB 색공간으로 변환
     lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
@@ -171,7 +174,7 @@ def enhance_image_contrast(image):
     l_clahe = clahe.apply(l)
     
     # 밝기조절 - 어둡게
-    l_clahe = np.clip(l_clahe * 0.01, 0, 255).astype(l.dtype)
+    l_clahe = np.clip(l_clahe * 0.9, 0, 255).astype(l.dtype)
     
     # 채널 합치기 및 색공간 변환
     enhanced_lab = cv2.merge((l_clahe, a, b))
@@ -553,11 +556,68 @@ def get_efficientunet_b7(nClasses, input_height=256, input_width=256, n_filters 
     return model
 
 #DeepLabv3+
-def get_deeplabv3plus():
-    model_url = "https://tfhub.dev/tensorflow/deeplabv3/1"
-    model = Sequential([
-        # hub.KerasLayer(model_url, output_shape=[256, 256, 3], input_shape=(256, 256, 3))
-    ])
+def convolution_block(
+    block_input,
+    num_filters=256,
+    kernel_size=3,
+    dilation_rate=1,
+    use_bias=False,
+):
+    x = layers.Conv2D(
+        num_filters,
+        kernel_size=kernel_size,
+        dilation_rate=dilation_rate,
+        padding="same",
+        use_bias=use_bias,
+        kernel_initializer=keras.initializers.HeNormal(),
+    )(block_input)
+    x = layers.BatchNormalization()(x)
+    return tf.keras.activations.relu(x)
+
+def dilated_spatial_pyramid_pooling(dspp_input):
+    dims = dspp_input.shape
+    x = layers.AveragePooling2D(pool_size=(dims[-3], dims[-2]))(dspp_input)
+    x = convolution_block(x, kernel_size=1, use_bias=True)
+    out_pool = layers.UpSampling2D(
+        size=(dims[-3] // x.shape[1], dims[-2] // x.shape[2]),
+        interpolation="bilinear",
+    )(x)
+
+    out_1 = convolution_block(dspp_input, kernel_size=1, dilation_rate=1)
+    out_6 = convolution_block(dspp_input, kernel_size=3, dilation_rate=6)
+    out_12 = convolution_block(dspp_input, kernel_size=3, dilation_rate=12)
+    out_18 = convolution_block(dspp_input, kernel_size=3, dilation_rate=18)
+
+    x = layers.Concatenate(axis=-1)([out_pool, out_1, out_6, out_12, out_18])
+    output = convolution_block(x, kernel_size=1)
+    return output
+
+def get_deeplab_v3_plus(nClasses, input_height=256, input_width=256, n_filters = 16, dropout = 0.1, batchnorm = True, n_channels=10):
+    input_shape=(input_height,input_width, n_channels)
+    model_input = keras.Input(shape=(input_shape[0], input_shape[1], 3))
+    preprocessed = tf.keras.applications.resnet50.preprocess_input(model_input)
+    resnet50 = tf.keras.applications.ResNet50(
+        weights="imagenet", include_top=False, input_tensor=preprocessed
+    )
+    x = resnet50.get_layer("conv4_block6_2_relu").output
+    x = dilated_spatial_pyramid_pooling(x)
+
+    input_a = layers.UpSampling2D(
+        size=(input_shape[0] // 4 // x.shape[1], input_shape[1] // 4 // x.shape[2]),
+        interpolation="bilinear",
+    )(x)
+    input_b = resnet50.get_layer("conv2_block3_2_relu").output
+    input_b = convolution_block(input_b, num_filters=48, kernel_size=1)
+
+    x = layers.Concatenate(axis=-1)([input_a, input_b])
+    x = convolution_block(x)
+    x = convolution_block(x)
+    x = layers.UpSampling2D(
+        size=(input_shape[0] // x.shape[1], input_shape[1] // x.shape[2]),
+        interpolation="bilinear",
+    )(x)
+    model_output = layers.Conv2D(nClasses, kernel_size=(1, 1), padding="same", activation='sigmoid')(x)
+    return keras.Model(inputs=model_input, outputs=model_output)
 
 def get_model(model_name, nClasses=1, input_height=128, input_width=128, n_filters = 16, dropout = 0.1, batchnorm = True, n_channels=10):
     if model_name == 'eb0':
@@ -569,7 +629,7 @@ def get_model(model_name, nClasses=1, input_height=128, input_width=128, n_filte
     elif model_name == 'unet':
         model =  get_unet
     elif model_name == 'deeplabv3+':
-        model = get_deeplabv3plus
+        model = get_deeplab_v3_plus
     elif model_name == 'attention_unet':
         model = get__attention_unet
     elif model_name == 'fcn':
@@ -589,7 +649,6 @@ def get_model(model_name, nClasses=1, input_height=128, input_width=128, n_filte
             batchnorm     = batchnorm,
             n_channels    = n_channels
         )
-
 ################################### metrics ########################################
 # dice score metric
 def dice_coef(y_true, y_pred, smooth=1e-6):
@@ -761,7 +820,7 @@ if not os.path.exists(OUTPUT_DIR):
 
 
 # train : val = 8 : 2 나누기
-x_tr, x_val = train_test_split(train_meta, test_size=0.2, random_state=RANDOM_STATE)
+x_tr, x_val = train_test_split(train_meta, test_size=0.25, random_state=RANDOM_STATE)
 print(len(x_tr), len(x_val)) #26860 6715
 
 # train : val 지정 및 generator
@@ -784,8 +843,8 @@ model.summary()
 
 
 # checkpoint 및 조기종료 설정
-es = EarlyStopping(monitor='miou', mode='max', verbose=1, patience=EARLY_STOP_PATIENCE, restore_best_weights=True)
-checkpoint = ModelCheckpoint(os.path.join(OUTPUT_DIR, CHECKPOINT_MODEL_NAME), monitor='miou', verbose=1,
+es = EarlyStopping(monitor='val_miou', mode='max', verbose=1, patience=EARLY_STOP_PATIENCE, restore_best_weights=True)
+checkpoint = ModelCheckpoint(os.path.join(OUTPUT_DIR, CHECKPOINT_MODEL_NAME), monitor='val_miou', verbose=1,
 save_best_only=True, mode='max', period=CHECKPOINT_PERIOD)
 
 
