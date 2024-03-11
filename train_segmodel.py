@@ -33,7 +33,6 @@ import joblib
 import time
 from keras.callbacks import Callback
 from sklearn.metrics import precision_score, recall_score, precision_recall_curve ,auc
-from skimage.transform import resize
 # import tensorflow_hub as hub
 import cv2
 import segmentation_models as sm
@@ -49,7 +48,7 @@ N_FILTERS = 32 # 필터수 지정
 N_CHANNELS = 3 # channel 지정
 EPOCHS = 100 # 훈련 epoch 지정
 BATCH_SIZE = 32 # batch size 지정
-IMAGE_SIZE = (512, 512) # 이미지 크기 지정
+IMAGE_SIZE = (256, 256) # 이미지 크기 지정
 MODEL_NAME = 'unet' # 모델 이름
 INITIAL_EPOCH = 0 # 초기 epoch
 THESHOLDS = 0.25
@@ -68,7 +67,7 @@ OUTPUT_DIR = f'datasets/train_output/{save_name}/'
 WORKERS = 24
 
 # 조기종료
-EARLY_STOP_PATIENCE = 7
+EARLY_STOP_PATIENCE = 10
 
 # 중간 가중치 저장 이름
 CHECKPOINT_PERIOD = 1
@@ -140,13 +139,11 @@ def get_img_arr(path, bands):
         img = rasterio.open(path).read(bands).transpose((1, 2, 0))
     else:
         img = rasterio.open(path).read().transpose((1, 2, 0))
-    img = resize(img, 512., anti_aliasing=True)
     img = np.float32(img) / MAX_PIXEL_VALUE
     return img
 
 def get_mask_arr(path):
     img = rasterio.open(path).read().transpose((1, 2, 0))
-    img = resize(img, 512., anti_aliasing=True)
     seg = np.float32(img)
     return seg
 
@@ -394,7 +391,7 @@ validation_generator = generator_from_lists(images_validation, masks_validation,
 
 # model 불러오기
 # model = get_model(MODEL_NAME, input_height=IMAGE_SIZE[0], input_width=IMAGE_SIZE[1], n_filters=N_FILTERS, n_channels=N_CHANNELS)
-model = sm.Unet('vgg16', classes=1, activation='sigmoid')
+model = sm.Unet('vgg16', classes=1, input_shape = (IMAGE_SIZE[0], IMAGE_SIZE[1], N_CHANNELS), activation='sigmoid', decoder_block_type='upsampling')
 model.compile(optimizer = Adam(), loss = 'binary_crossentropy', metrics = ['accuracy', dice_coef, pixel_accuracy, 
                                                                            Precision(), Recall(), mAP(), miou])
 model.summary()
