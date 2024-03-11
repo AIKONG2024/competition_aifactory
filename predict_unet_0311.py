@@ -32,7 +32,7 @@ from sklearn.model_selection import train_test_split
 import joblib
 import time
 from keras.callbacks import Callback
-from sklearn.metrics import precision_score, recall_score, precision_recall_curve ,auc
+from sklearn.metrics import precision_score, recall_score, precision_recall_curve ,auc,average_precision_score
 # import tensorflow_hub as hub
 import cv2
 
@@ -43,9 +43,9 @@ np.random.seed(RANDOM_STATE)
 
 MAX_PIXEL_VALUE = 65535 # 이미지 정규화를 위한 픽셀 최대값
 
-N_FILTERS = 64 # 필터수 지정
+N_FILTERS = 16 # 필터수 지정
 N_CHANNELS = 3 # channel 지정
-EPOCHS = 300 # 훈련 epoch 지정
+EPOCHS = 120 # 훈련 epoch 지정
 BATCH_SIZE = 16 # batch size 지정
 IMAGE_SIZE = (256, 256) # 이미지 크기 지정
 MODEL_NAME = 'unet' # 모델 이름
@@ -66,7 +66,7 @@ OUTPUT_DIR = f'datasets/train_output/{save_name}/'
 WORKERS = 15
 
 # 조기종료
-EARLY_STOP_PATIENCE = 40
+EARLY_STOP_PATIENCE = 30
 
 # 중간 가중치 저장 이름
 CHECKPOINT_PERIOD = 1
@@ -714,96 +714,90 @@ def show_bands_image(image_path, band = (0,0,0)):
     plt.show()
     return img
 
-
-###################################################Field################################################
-
-# GPU 설정
-os.environ["CUDA_VISIBLE_DEVICES"] = str(CUDA_DEVICE)
-try:
-    config = tf.compat.v1.ConfigProto()
-    config.gpu_options.allow_growth = True
-    sess = tf.compat.v1.Session(config=config)
-    K.set_session(sess)
-except:
-    pass
-
-try:
-    np.random.bit_generator = np.random._bit_generator
-except:
-    pass
-
+MODEL_NAME = 'unet' # 모델 이름
+WEIGHT_NAME = '20240311173420/model_unet_20240311173420_final_weights.h5'
 train_meta = pd.read_csv('datasets/train_meta.csv')
 test_meta = pd.read_csv('datasets/test_meta.csv')
 
-# 저장 폴더 없으면 생성
-if not os.path.exists(OUTPUT_DIR):
-    os.makedirs(OUTPUT_DIR)
-    
-# for i in range(0,1000) :
-#     #데이터 확인
-    # show_band_images(IMAGES_PATH + f'train_img_{i}.tif', MASKS_PATH + f'train_mask_{i}.tif')
-#     show_bands_image(IMAGES_PATH + f'train_img_{i}.tif', (7,6,8))
-
-#대비 확인
-# fig, axs = plt.subplots(3, 4, figsize=(20, 12))
-# axs = axs.ravel()
-# for i in range(10):
-#     img = rasterio.open(IMAGES_PATH + f'train_img_{i}.tif').read([7,6,8]).transpose((1, 2, 0)).astype(np.float32) / MAX_PIXEL_VALUE
-#     img = np.uint8(img * 255)  # 이미지를 8-bit 정수 타입으로 변환
-#     img = enhance_image_contrast(img)
-#     img = img.astype(np.float32) / 255 #다시 32 float 타입 변환
-#     axs[i].imshow(img)
-#     axs[i].set_title(f'Band {i+1}')
-#     axs[i].axis('off')
-# plt.title('enhance_image_contrast')
-# plt.tight_layout()
-# plt.show() 
-
-
-# train : val = 8 : 2 나누기
-x_tr, x_val = train_test_split(train_meta, test_size=0.2, random_state=RANDOM_STATE)
-print(len(x_tr), len(x_val)) #26860 6715
-
-# train : val 지정 및 generator
-images_train = [os.path.join(IMAGES_PATH, image) for image in x_tr['train_img'] ]
-masks_train = [os.path.join(MASKS_PATH, mask) for mask in x_tr['train_mask'] ]
-
-images_validation = [os.path.join(IMAGES_PATH, image) for image in x_val['train_img'] ]
-masks_validation = [os.path.join(MASKS_PATH, mask) for mask in x_val['train_mask'] ]
-
-
-train_generator = generator_from_lists(images_train, masks_train, batch_size=BATCH_SIZE, random_state=RANDOM_STATE)
-validation_generator = generator_from_lists(images_validation, masks_validation, batch_size=BATCH_SIZE, random_state=RANDOM_STATE)
-
-
-# model 불러오기
 model = get_model(MODEL_NAME, input_height=IMAGE_SIZE[0], input_width=IMAGE_SIZE[1], n_filters=N_FILTERS, n_channels=N_CHANNELS)
-model.compile(optimizer = Adam(), loss = 'binary_crossentropy', metrics = ['accuracy', dice_coef, pixel_accuracy, 
-                                                                           Precision(), Recall(), mAP(), miou])
+model.compile(optimizer = Adam(), loss = 'binary_crossentropy', metrics = ['accuracy', dice_coef, pixel_accuracy])
 model.summary()
 
+model.load_weights(f'datasets/train_output/{WEIGHT_NAME}')
+y_pred_dict = {}
 
-# checkpoint 및 조기종료 설정
-es = EarlyStopping(monitor='val_miou', mode='max', verbose=1, patience=EARLY_STOP_PATIENCE, restore_best_weights=True)
-checkpoint = ModelCheckpoint(os.path.join(OUTPUT_DIR, CHECKPOINT_MODEL_NAME), monitor='val_miou', verbose=1,
-save_best_only=True, mode='max', period=CHECKPOINT_PERIOD)
+for idx, i in enumerate(test_meta['test_img']):
+    img = get_img_arr(f'datasets/test_img/{i}', (7,6,8)) 
+    img = np.uint8(img * 255) 
+    img = enhance_image_contrast(img)
+    img = img.astype(np.float32) / 255
+    y_pred = model.predict(np.array([img]), batch_size=32)
+    y_pred = np.where(y_pred[0, :, :, 0] > THESHOLDS, 1, 0) # 임계값 처리
+    y_pred = y_pred.astype(np.uint8)
+    y_pred_dict[i] = y_pred
+    
+ #mAP확인 - train
+# thresholds = [0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9]
+# aps_per_threshold = {threshold: [] for threshold in thresholds}  # 각 임계치별 AP를 저장할 딕셔너리
 
+# #임계치마다 500개의 점수 확인
+# for idx, img_name in enumerate(train_meta['train_img']):
+#     if 500 < idx < 1200:
+    
+#         img_path = f'datasets/train_img/{img_name}' 
+#         mask_path = img_path.replace('train_img', 'train_mask')
+#         img = get_img_arr(img_path, bands=(7,6,8))
+#         img = np.uint8(img * 255) 
+#         img = enhance_image_contrast(img)
+#         img = img.astype(np.float32) / 255
+#         img_pred = np.array([img])
+        
+#         # 실제 마스크 로드 및 변환
+#         true_mask = get_mask_arr(mask_path).flatten()  # 실제 마스크는 이미 0과 1로 이루어져 있다고 가정
 
-print('---model 훈련 시작---')
-history = model.fit_generator(
-    train_generator,
-    steps_per_epoch=len(images_train) // BATCH_SIZE,
-    validation_data=validation_generator,
-    validation_steps=len(images_validation) // BATCH_SIZE,
-    callbacks=[checkpoint, es, CometLogger()],
-    epochs=EPOCHS,
-    workers=WORKERS,
-    initial_epoch=INITIAL_EPOCH
-)
-print('---model 훈련 종료---')
+#         for threshold in thresholds:
+#             y_pred = model.predict(img_pred, batch_size=1)
+#             y_pred_thresh = np.where(y_pred[0, :, :, 0] > threshold, 1, 0).flatten()
+#             y_pred_thresh = y_pred_thresh.astype(np.uint8)
+            
+#             # 각 임계치에서 AP 계산
+#             ap = average_precision_score(true_mask, y_pred_thresh)
+#             aps_per_threshold[threshold].append(ap)
 
+# # 각 임계치별로 AP의 평균을 계산하고 출력
+# for threshold, aps in aps_per_threshold.items():
+#     avg_ap = np.mean(aps)
+#     print(f"Threhold {threshold} AP] {avg_ap}")
 
-print('가중치 저장')
-model_weights_output = os.path.join(OUTPUT_DIR, FINAL_WEIGHTS_OUTPUT)
-model.save_weights(model_weights_output)
-print("저장된 가중치 명: {}".format(model_weights_output))
+# # 모든 임계치에 대한 AP의 평균을 계산하여 mAP를 도출
+# map = np.mean([np.mean(aps) for aps in aps_per_threshold.values()])
+# print("[mAP]", map)   
+#임계치마다 비교 확인 - test
+# thresholds = [0.25, 0.5, 0.75]  # 비교할 임계치 값들
+
+# for idx, img_name in enumerate(test_meta['test_img']):
+#     if idx == 30:
+#         break
+#     img_path = f'datasets/test_img/{img_name}'
+#     img = get_img_arr(img_path, bands=(7,6,8))
+#     img = np.uint8(img * 255)  # 이미지를 8-bit 정수 타입으로 변환
+#     img = enhance_image_contrast(img)
+#     img = img.astype(np.float32) / 255  # 다시 32 float 타입으로 변환
+#     img_pred = np.array([img])
+    
+#     fig, axs = plt.subplots(1, len(thresholds) + 1, figsize=(20, 5))  # 원본 이미지 + 임계치별 예측 이미지
+#     axs[0].imshow(img)
+#     axs[0].set_title('Original Image')
+#     axs[0].axis('off')
+    
+#     for i, threshold in enumerate(thresholds):
+#         y_pred = model.predict(img_pred, batch_size=1)
+#         y_pred_thresh = np.where(y_pred[0, :, :, 0] > threshold, 1, 0)
+#         y_pred_thresh = y_pred_thresh.astype(np.uint8)
+        
+#         axs[i+1].imshow(y_pred_thresh)
+#         axs[i+1].set_title(f'Threshold: {threshold}')
+#         axs[i+1].axis('off')
+name = WEIGHT_NAME.split('/')[1]
+joblib.dump(y_pred_dict, f'predict/{name}_y_pred.pkl')
+print("저장된 pkl:", f'predict/{name}_y_pred.pkl')
