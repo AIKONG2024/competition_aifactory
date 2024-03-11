@@ -784,8 +784,8 @@ model.summary()
 
 
 # checkpoint 및 조기종료 설정
-es = EarlyStopping(monitor='val_miou', mode='max', verbose=1, patience=EARLY_STOP_PATIENCE, restore_best_weights=True)
-checkpoint = ModelCheckpoint(os.path.join(OUTPUT_DIR, CHECKPOINT_MODEL_NAME), monitor='val_miou', verbose=1,
+es = EarlyStopping(monitor='miou', mode='max', verbose=1, patience=EARLY_STOP_PATIENCE, restore_best_weights=True)
+checkpoint = ModelCheckpoint(os.path.join(OUTPUT_DIR, CHECKPOINT_MODEL_NAME), monitor='miou', verbose=1,
 save_best_only=True, mode='max', period=CHECKPOINT_PERIOD)
 
 

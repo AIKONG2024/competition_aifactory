@@ -714,96 +714,29 @@ def show_bands_image(image_path, band = (0,0,0)):
     plt.show()
     return img
 
-
-###################################################Field################################################
-
-# GPU 설정
-os.environ["CUDA_VISIBLE_DEVICES"] = str(CUDA_DEVICE)
-try:
-    config = tf.compat.v1.ConfigProto()
-    config.gpu_options.allow_growth = True
-    sess = tf.compat.v1.Session(config=config)
-    K.set_session(sess)
-except:
-    pass
-
-try:
-    np.random.bit_generator = np.random._bit_generator
-except:
-    pass
-
+MODEL_NAME = 'unet' # 모델 이름
+WEIGHT_NAME = '20240311003057/checkpoint-unet-20240311003057-epoch_43.hdf5'
 train_meta = pd.read_csv('datasets/train_meta.csv')
 test_meta = pd.read_csv('datasets/test_meta.csv')
 
-# 저장 폴더 없으면 생성
-if not os.path.exists(OUTPUT_DIR):
-    os.makedirs(OUTPUT_DIR)
-    
-# for i in range(0,1000) :
-#     #데이터 확인
-    # show_band_images(IMAGES_PATH + f'train_img_{i}.tif', MASKS_PATH + f'train_mask_{i}.tif')
-#     show_bands_image(IMAGES_PATH + f'train_img_{i}.tif', (7,6,8))
-
-#대비 확인
-# fig, axs = plt.subplots(3, 4, figsize=(20, 12))
-# axs = axs.ravel()
-# for i in range(10):
-#     img = rasterio.open(IMAGES_PATH + f'train_img_{i}.tif').read([7,6,8]).transpose((1, 2, 0)).astype(np.float32) / MAX_PIXEL_VALUE
-#     img = np.uint8(img * 255)  # 이미지를 8-bit 정수 타입으로 변환
-#     img = enhance_image_contrast(img)
-#     img = img.astype(np.float32) / 255 #다시 32 float 타입 변환
-#     axs[i].imshow(img)
-#     axs[i].set_title(f'Band {i+1}')
-#     axs[i].axis('off')
-# plt.title('enhance_image_contrast')
-# plt.tight_layout()
-# plt.show() 
-
-
-# train : val = 8 : 2 나누기
-x_tr, x_val = train_test_split(train_meta, test_size=0.2, random_state=RANDOM_STATE)
-print(len(x_tr), len(x_val)) #26860 6715
-
-# train : val 지정 및 generator
-images_train = [os.path.join(IMAGES_PATH, image) for image in x_tr['train_img'] ]
-masks_train = [os.path.join(MASKS_PATH, mask) for mask in x_tr['train_mask'] ]
-
-images_validation = [os.path.join(IMAGES_PATH, image) for image in x_val['train_img'] ]
-masks_validation = [os.path.join(MASKS_PATH, mask) for mask in x_val['train_mask'] ]
-
-
-train_generator = generator_from_lists(images_train, masks_train, batch_size=BATCH_SIZE, random_state=RANDOM_STATE)
-validation_generator = generator_from_lists(images_validation, masks_validation, batch_size=BATCH_SIZE, random_state=RANDOM_STATE)
-
-
-# model 불러오기
 model = get_model(MODEL_NAME, input_height=IMAGE_SIZE[0], input_width=IMAGE_SIZE[1], n_filters=N_FILTERS, n_channels=N_CHANNELS)
-model.compile(optimizer = Adam(), loss = 'binary_crossentropy', metrics = ['accuracy', dice_coef, pixel_accuracy, 
-                                                                           Precision(), Recall(), mAP(), miou])
+model.compile(optimizer = Adam(), loss = 'binary_crossentropy', metrics = ['accuracy', dice_coef, pixel_accuracy])
 model.summary()
 
+model.load_weights(f'datasets/train_output/{WEIGHT_NAME}')
+y_pred_dict = {}
 
-# checkpoint 및 조기종료 설정
-es = EarlyStopping(monitor='val_miou', mode='max', verbose=1, patience=EARLY_STOP_PATIENCE, restore_best_weights=True)
-checkpoint = ModelCheckpoint(os.path.join(OUTPUT_DIR, CHECKPOINT_MODEL_NAME), monitor='val_miou', verbose=1,
-save_best_only=True, mode='max', period=CHECKPOINT_PERIOD)
+for idx, i in enumerate(test_meta['test_img']):
+    img = get_img_arr(f'datasets/test_img/{i}', (7,6,8)) 
+    y_pred = model.predict(np.array([img]), batch_size=1)
 
+    y_pred = np.where(y_pred[0, :, :, 0] > THESHOLDS, 1, 0) # 임계값 처리
+    y_pred = y_pred.astype(np.uint8)
+    y_pred_dict[i] = y_pred
+    # plt.figure(figsize=(10,10))
+    # plt.imshow(y_pred)
+    # plt.show()
 
-print('---model 훈련 시작---')
-history = model.fit_generator(
-    train_generator,
-    steps_per_epoch=len(images_train) // BATCH_SIZE,
-    validation_data=validation_generator,
-    validation_steps=len(images_validation) // BATCH_SIZE,
-    callbacks=[checkpoint, es, CometLogger()],
-    epochs=EPOCHS,
-    workers=WORKERS,
-    initial_epoch=INITIAL_EPOCH
-)
-print('---model 훈련 종료---')
-
-
-print('가중치 저장')
-model_weights_output = os.path.join(OUTPUT_DIR, FINAL_WEIGHTS_OUTPUT)
-model.save_weights(model_weights_output)
-print("저장된 가중치 명: {}".format(model_weights_output))
+joblib.dump(y_pred_dict, )
+joblib.dump(y_pred_dict, f'predict/{WEIGHT_NAME}_y_pred.pkl')
+print("저장된 pkl:", f'predict/{WEIGHT_NAME}_y_pred.pkl')
