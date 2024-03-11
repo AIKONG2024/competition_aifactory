@@ -561,7 +561,7 @@ print("[mAP]", map)
 #         y_pred_thresh = np.where(y_pred[0, :, :, 0] > threshold, 1, 0)
 #         y_pred_thresh = y_pred_thresh.astype(np.uint8)
         
-#         axs[i+1].imshow(y_pred_thresh)
+#         axs[i+1].imshow(y_pred_thresh) 
 #         axs[i+1].set_title(f'Threshold: {threshold}')
 #         axs[i+1].axis('off')
     

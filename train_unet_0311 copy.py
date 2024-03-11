@@ -43,9 +43,9 @@ np.random.seed(RANDOM_STATE)
 
 MAX_PIXEL_VALUE = 65535 # 이미지 정규화를 위한 픽셀 최대값
 
-N_FILTERS = 64 # 필터수 지정
+N_FILTERS = 16 # 필터수 지정
 N_CHANNELS = 3 # channel 지정
-EPOCHS = 120 # 훈련 epoch 지정
+EPOCHS = 20 # 훈련 epoch 지정
 BATCH_SIZE = 16 # batch size 지정
 IMAGE_SIZE = (256, 256) # 이미지 크기 지정
 MODEL_NAME = 'unet' # 모델 이름
@@ -63,10 +63,10 @@ MASKS_PATH = 'datasets/train_mask/'
 
 # 가중치 저장 위치
 OUTPUT_DIR = f'datasets/train_output/{save_name}/'
-WORKERS = 15
+WORKERS = 24
 
 # 조기종료
-EARLY_STOP_PATIENCE = 30
+EARLY_STOP_PATIENCE = 7
 
 # 중간 가중치 저장 이름
 CHECKPOINT_PERIOD = 1
@@ -161,7 +161,7 @@ def get_image_data_gen():
 #색채 대비
 def enhance_image_contrast(image):
     # CLAHE 객체 생성
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
     
     # 이미지를 LAB 색공간으로 변환
     lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
@@ -171,7 +171,7 @@ def enhance_image_contrast(image):
     l_clahe = clahe.apply(l)
     
     # 밝기조절 - 어둡게
-    l_clahe = np.clip(l_clahe * 0.01, 0, 255).astype(l.dtype)
+    l_clahe = np.clip(l_clahe * 0.7, 0, 255).astype(l.dtype)
     
     # 채널 합치기 및 색공간 변환
     enhanced_lab = cv2.merge((l_clahe, a, b))

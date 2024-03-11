@@ -276,6 +276,5 @@ for idx, i in enumerate(test_meta['test_img']):
     # plt.imshow(y_pred)
     # plt.show()
 
-joblib.dump(y_pred_dict, )
-joblib.dump(y_pred_dict, f'predict/{WEIGHT_NAME}_y_pred.pkl')
-print("저장된 pkl:", f'predict/{WEIGHT_NAME}_y_pred.pkl')
+joblib.dump(y_pred_dict, f'predict/{WEIGHT_NAME.split('/')[1]}_y_pred.pkl')
+print("저장된 pkl:", f'predict/{WEIGHT_NAME.split('/')[1]}_y_pred.pkl')
