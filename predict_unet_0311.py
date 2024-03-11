@@ -43,7 +43,7 @@ np.random.seed(RANDOM_STATE)
 
 MAX_PIXEL_VALUE = 65535 # 이미지 정규화를 위한 픽셀 최대값
 
-N_FILTERS = 64 # 필터수 지정
+N_FILTERS = 16 # 필터수 지정
 N_CHANNELS = 3 # channel 지정
 EPOCHS = 120 # 훈련 epoch 지정
 BATCH_SIZE = 16 # batch size 지정
@@ -715,7 +715,7 @@ def show_bands_image(image_path, band = (0,0,0)):
     return img
 
 MODEL_NAME = 'unet' # 모델 이름
-WEIGHT_NAME = '20240311003057/checkpoint-unet-20240311003057-epoch_43.hdf5'
+WEIGHT_NAME = '20240311173420/model_unet_20240311173420_final_weights.h5'
 train_meta = pd.read_csv('datasets/train_meta.csv')
 test_meta = pd.read_csv('datasets/test_meta.csv')
 
@@ -735,9 +735,6 @@ for idx, i in enumerate(test_meta['test_img']):
     y_pred = np.where(y_pred[0, :, :, 0] > THESHOLDS, 1, 0) # 임계값 처리
     y_pred = y_pred.astype(np.uint8)
     y_pred_dict[i] = y_pred
-    # plt.figure(figsize=(10,10))
-    # plt.imshow(y_pred)
-    # plt.show()
     
  #mAP확인 - train
 # thresholds = [0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9]

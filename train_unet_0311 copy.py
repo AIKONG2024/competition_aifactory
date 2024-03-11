@@ -33,6 +33,7 @@ import joblib
 import time
 from keras.callbacks import Callback
 from sklearn.metrics import precision_score, recall_score, precision_recall_curve ,auc
+from skimage.transform import resize
 # import tensorflow_hub as hub
 import cv2
 
@@ -43,11 +44,11 @@ np.random.seed(RANDOM_STATE)
 
 MAX_PIXEL_VALUE = 65535 # 이미지 정규화를 위한 픽셀 최대값
 
-N_FILTERS = 16 # 필터수 지정
+N_FILTERS = 32 # 필터수 지정
 N_CHANNELS = 3 # channel 지정
-EPOCHS = 20 # 훈련 epoch 지정
-BATCH_SIZE = 16 # batch size 지정
-IMAGE_SIZE = (256, 256) # 이미지 크기 지정
+EPOCHS = 100 # 훈련 epoch 지정
+BATCH_SIZE = 32 # batch size 지정
+IMAGE_SIZE = (512, 512) # 이미지 크기 지정
 MODEL_NAME = 'unet' # 모델 이름
 INITIAL_EPOCH = 0 # 초기 epoch
 THESHOLDS = 0.25
@@ -138,11 +139,13 @@ def get_img_arr(path, bands):
         img = rasterio.open(path).read(bands).transpose((1, 2, 0))
     else:
         img = rasterio.open(path).read().transpose((1, 2, 0))
-    img = np.float32(img)/MAX_PIXEL_VALUE
+    img = resize(img, 512., anti_aliasing=True)
+    img = np.float32(img) / MAX_PIXEL_VALUE
     return img
 
 def get_mask_arr(path):
     img = rasterio.open(path).read().transpose((1, 2, 0))
+    img = resize(img, 512., anti_aliasing=True)
     seg = np.float32(img)
     return seg
 
@@ -171,7 +174,7 @@ def enhance_image_contrast(image):
     l_clahe = clahe.apply(l)
     
     # 밝기조절 - 어둡게
-    l_clahe = np.clip(l_clahe * 0.7, 0, 255).astype(l.dtype)
+    l_clahe = np.clip(l_clahe * 0.9, 0, 255).astype(l.dtype)
     
     # 채널 합치기 및 색공간 변환
     enhanced_lab = cv2.merge((l_clahe, a, b))
@@ -761,7 +764,7 @@ if not os.path.exists(OUTPUT_DIR):
 
 
 # train : val = 8 : 2 나누기
-x_tr, x_val = train_test_split(train_meta, test_size=0.2, random_state=RANDOM_STATE)
+x_tr, x_val = train_test_split(train_meta, test_size=0.25, random_state=RANDOM_STATE)
 print(len(x_tr), len(x_val)) #26860 6715
 
 # train : val 지정 및 generator
@@ -784,8 +787,8 @@ model.summary()
 
 
 # checkpoint 및 조기종료 설정
-es = EarlyStopping(monitor='miou', mode='max', verbose=1, patience=EARLY_STOP_PATIENCE, restore_best_weights=True)
-checkpoint = ModelCheckpoint(os.path.join(OUTPUT_DIR, CHECKPOINT_MODEL_NAME), monitor='miou', verbose=1,
+es = EarlyStopping(monitor='val_miou', mode='max', verbose=1, patience=EARLY_STOP_PATIENCE, restore_best_weights=True)
+checkpoint = ModelCheckpoint(os.path.join(OUTPUT_DIR, CHECKPOINT_MODEL_NAME), monitor='val_miou', verbose=1,
 save_best_only=True, mode='max', period=CHECKPOINT_PERIOD)
 
 
