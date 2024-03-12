@@ -1,10 +1,9 @@
+# -*- coding: utf-8 -*-
 from keras.models import *
 from keras.layers import *
 from keras.activations import *
 import tensorflow as tf
 from keras import backend as K
-
-# -*- coding: utf-8 -*-
 
 import os
 import warnings
@@ -53,7 +52,7 @@ MAX_PIXEL_VALUE = 65535 # 이미지 정규화를 위한 픽셀 최대값
 N_FILTERS = 32 # 필터수 지정
 N_CHANNELS = 3 # channel 지정
 EPOCHS = 100 # 훈련 epoch 지정
-BATCH_SIZE = 8 # batch size 지정
+BATCH_SIZE = 2 # batch size 지정
 IMAGE_SIZE = (256, 256) # 이미지 크기 지정
 MODEL_NAME = 'unet' # 모델 이름
 INITIAL_EPOCH = 0 # 초기 epoch
@@ -268,6 +267,19 @@ def build_model(input_size,  keep_prob=1.0, one_hot_label=False):
     return model
 
 
+#miou metric
+def miou(y_true, y_pred, smooth=1e-6):
+    # 임계치 기준으로 이진화
+    y_pred = tf.cast(y_pred > THESHOLDS, tf.float32)
+    
+    intersection = tf.reduce_sum(y_true * y_pred, axis=[1, 2, 3])
+    union = tf.reduce_sum(y_true, axis=[1, 2, 3]) + tf.reduce_sum(y_pred, axis=[1, 2, 3]) - intersection
+    
+    # mIoU 계산
+    iou = (intersection + smooth) / (union + smooth)
+    miou = tf.reduce_mean(iou)
+    return miou
+
 ############################################################이미지 전처리#########################################################
 def get_img_arr(path, bands):
     if len(bands) > 0 :
@@ -396,7 +408,7 @@ validation_generator = generator_from_lists(images_validation, masks_validation,
 
 # model 불러오기
 model = build_model(input_size=(IMAGE_SIZE[0],IMAGE_SIZE[1] ,N_CHANNELS))
-model.compile(optimizer = Adam(learning_rate=0.001), loss = 'binary_crossentropy', metrics = ['accuracy'])
+model.compile(optimizer = Adam(learning_rate=0.001), loss = 'binary_crossentropy', metrics = ['accuracy', miou])
 model.summary()
 
 
