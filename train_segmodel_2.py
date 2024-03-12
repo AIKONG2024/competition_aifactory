@@ -47,7 +47,7 @@ MAX_PIXEL_VALUE = 65535 # 이미지 정규화를 위한 픽셀 최대값
 N_FILTERS = 32 # 필터수 지정
 N_CHANNELS = 3 # channel 지정
 EPOCHS = 100 # 훈련 epoch 지정
-BATCH_SIZE = 16 # batch size 지정
+BATCH_SIZE = 8 # batch size 지정
 IMAGE_SIZE = (256, 256) # 이미지 크기 지정
 MODEL_NAME = 'unet' # 모델 이름
 INITIAL_EPOCH = 0 # 초기 epoch
@@ -220,135 +220,6 @@ def generator_from_lists(images_path, masks_path, batch_size=32, shuffle = True,
                 images = []
                 masks = []
 
-
-#############################################모델################################################
-
-
-################################### metrics ########################################
-# dice score metric
-def dice_coef(y_true, y_pred, smooth=1e-6):
-    intersection = tf.reduce_sum(y_true * y_pred, axis=[1, 2, 3])
-    union = tf.reduce_sum(y_true, axis=[1, 2, 3]) + tf.reduce_sum(y_pred, axis=[1, 2, 3])
-    dice = tf.reduce_mean((2. * intersection + smooth) / (union + smooth), axis=0)
-    return dice
-
-# 픽셀 정확도 metric
-def pixel_accuracy(y_true, y_pred):
-    # 임계치 기준으로 이진화
-    y_pred = tf.cast(y_pred > THESHOLDS, tf.float32)
-    
-    # 논리적 AND 연산으로 정확한 예측의 수를 계산
-    correct_prediction = tf.logical_and(tf.equal(y_pred, 1), tf.equal(y_true, 1))
-    sum_n = tf.reduce_sum(tf.cast(correct_prediction, tf.float32))
-    
-    # 실제 True의 총 수
-    sum_t = tf.reduce_sum(y_true)
-    
-    # 조건부로 픽셀 정확도 계산
-    pixel_accuracy = tf.cond(sum_t > 0, lambda: sum_n / sum_t, lambda: tf.constant(0.0))
-    
-    return pixel_accuracy
-
-#miou metric
-def miou(y_true, y_pred, smooth=1e-6):
-    # 임계치 기준으로 이진화
-    y_pred = tf.cast(y_pred > THESHOLDS, tf.float32)
-    
-    intersection = tf.reduce_sum(y_true * y_pred, axis=[1, 2, 3])
-    union = tf.reduce_sum(y_true, axis=[1, 2, 3]) + tf.reduce_sum(y_pred, axis=[1, 2, 3]) - intersection
-    
-    # mIoU 계산
-    iou = (intersection + smooth) / (union + smooth)
-    miou = tf.reduce_mean(iou)
-    return miou
-
-#precision metric
-class Precision(tf.keras.metrics.Metric):
-    def __init__(self, name='precision', **kwargs):
-        super().__init__(name=name, **kwargs)
-        self.true_positives = self.add_weight(name='tp', initializer='zeros')
-        self.predicted_positives = self.add_weight(name='pp', initializer='zeros')
-
-    def update_state(self, y_true, y_pred, sample_weight=None):
-        y_pred = tf.round(y_pred)
-        true_positives = tf.reduce_sum(tf.cast(y_true * y_pred, tf.float32))
-        predicted_positives = tf.reduce_sum(y_pred)
-        
-        self.true_positives.assign_add(true_positives)
-        self.predicted_positives.assign_add(predicted_positives)
-
-    def result(self):
-        precision = self.true_positives / (self.predicted_positives + tf.keras.backend.epsilon())
-        return precision
-
-    def reset_states(self):
-        self.true_positives.assign(0)
-        self.predicted_positives.assign(0)
-        
-#recall metric
-class Recall(tf.keras.metrics.Metric):
-    def __init__(self, name='recall', **kwargs):
-        super().__init__(name=name, **kwargs)
-        self.true_positives = self.add_weight(name='tp', initializer='zeros')
-        self.actual_positives = self.add_weight(name='ap', initializer='zeros')
-
-    def update_state(self, y_true, y_pred, sample_weight=None):
-        y_pred = tf.round(y_pred)
-        true_positives = tf.reduce_sum(tf.cast(y_true * y_pred, tf.float32))
-        actual_positives = tf.reduce_sum(y_true)
-        
-        self.true_positives.assign_add(true_positives)
-        self.actual_positives.assign_add(actual_positives)
-
-    def result(self):
-        recall = self.true_positives / (self.actual_positives + tf.keras.backend.epsilon())
-        return recall
-
-    def reset_states(self):
-        self.true_positives.assign(0)
-        self.actual_positives.assign(0)
-
-#mAP metric
-class mAP(tf.keras.metrics.AUC):
-    def __init__(self, name='mAP', **kwargs):
-        super(mAP, self).__init__(name=name, curve='PR', **kwargs)
-        
-
-
-###################################################################################
-
-#band 이미지와 마스킹 이미지 확인
-def show_band_images(image_path, mask_path):
-    fig, axs = plt.subplots(3, 4, figsize=(20, 12))
-    axs = axs.ravel()
-    
-    for i in range(10):
-        img = rasterio.open(image_path).read(i+1).astype(np.float32) / MAX_PIXEL_VALUE
-        axs[i].imshow(img)
-        axs[i].set_title(f'Band {i+1}')
-        axs[i].axis('off')
-    
-    img = rasterio.open(mask_path).read(1).astype(np.float32) / MAX_PIXEL_VALUE
-    axs[10].imshow(img)
-    axs[10].set_title('Mask Image')
-    axs[10].axis('off')
-    axs[11].axis('off')
-    plt.title('Band images compare Mask image')
-    plt.tight_layout()
-    plt.show() 
-
-#밴드 조합 이미지 확인
-def show_bands_image(image_path, band = (0,0,0)):
-    img = rasterio.open(image_path).read(band).transpose((1, 2, 0))
-    img = np.float32(img)/MAX_PIXEL_VALUE
-    plt.figure(figsize=(10, 10))
-    plt.imshow(img)
-    plt.axis('off')  # 축 표시 없애기
-    plt.title(f'Band {band} combine image')
-    plt.show()
-    return img
-
-
 ###################################################Field################################################
 
 # GPU 설정
@@ -373,8 +244,11 @@ test_meta = pd.read_csv('datasets/test_meta.csv')
 if not os.path.exists(OUTPUT_DIR):
     os.makedirs(OUTPUT_DIR)
 
+BACKBONE = 'resnet34'
+preprocess_input = sm.get_preprocessing(BACKBONE)
+
 # train : val = 8 : 2 나누기
-x_tr, x_val = train_test_split(train_meta, test_size=0.25, random_state=RANDOM_STATE)
+x_tr, x_val = train_test_split(train_meta, test_size=0.2, random_state=RANDOM_STATE)
 print(len(x_tr), len(x_val)) #26860 6715
 
 # train : val 지정 및 generator
@@ -384,17 +258,15 @@ masks_train = [os.path.join(MASKS_PATH, mask) for mask in x_tr['train_mask'] ]
 images_validation = [os.path.join(IMAGES_PATH, image) for image in x_val['train_img'] ]
 masks_validation = [os.path.join(MASKS_PATH, mask) for mask in x_val['train_mask'] ]
 
-
 train_generator = generator_from_lists(images_train, masks_train, batch_size=BATCH_SIZE, random_state=RANDOM_STATE)
 validation_generator = generator_from_lists(images_validation, masks_validation, batch_size=BATCH_SIZE, random_state=RANDOM_STATE)
 
+train_generator_prep = preprocess_input(train_generator[0])
+validation_generator_prep = preprocess_input(validation_generator[0])
 
 # model 불러오기
-# model = get_model(MODEL_NAME, input_height=IMAGE_SIZE[0], input_width=IMAGE_SIZE[1], n_filters=N_FILTERS, n_channels=N_CHANNELS)
-# model = sm.Unet('vgg16', classes=1, input_shape = (IMAGE_SIZE[0], IMAGE_SIZE[1], N_CHANNELS), activation='sigmoid', decoder_block_type='upsampling')
-model = sm.Unet('resnext50', classes=1, input_shape = (IMAGE_SIZE[0], IMAGE_SIZE[1], N_CHANNELS), activation='sigmoid', decoder_block_type='transpose')
-model.compile(optimizer = Adam(learning_rate=0.001), loss = 'binary_crossentropy', metrics = ['accuracy', dice_coef, pixel_accuracy, 
-                                                                           Precision(), Recall(), mAP(), miou])
+model = sm.FPN('vgg16', classes=1, input_shape = (IMAGE_SIZE[0], IMAGE_SIZE[1], N_CHANNELS), activation='sigmoid', encoder_weights='imagenet')
+model.compile(optimizer = Adam(learning_rate=0.001), loss = 'binary_crossentropy', metrics = ['accuracy'])
 model.summary()
 
 

@@ -1,3 +1,9 @@
+from keras.models import *
+from keras.layers import *
+from keras.activations import *
+import tensorflow as tf
+from keras import backend as K
+
 # -*- coding: utf-8 -*-
 
 import os
@@ -47,7 +53,7 @@ MAX_PIXEL_VALUE = 65535 # 이미지 정규화를 위한 픽셀 최대값
 N_FILTERS = 32 # 필터수 지정
 N_CHANNELS = 3 # channel 지정
 EPOCHS = 100 # 훈련 epoch 지정
-BATCH_SIZE = 16 # batch size 지정
+BATCH_SIZE = 8 # batch size 지정
 IMAGE_SIZE = (256, 256) # 이미지 크기 지정
 MODEL_NAME = 'unet' # 모델 이름
 INITIAL_EPOCH = 0 # 초기 epoch
@@ -132,6 +138,135 @@ def threadsafe_generator(f):
         return threadsafe_iter(f(*a, **kw))
 
     return g
+
+
+def add(tensor_a,tensor_b):
+    return Add()([tensor_a,tensor_b])
+
+def multiply(tensor_a,tensor_b):
+    return Multiply()([tensor_a,tensor_b])
+
+def concat(tensor_a,tensor_b):
+    return Concatenate(axis=3)([tensor_a,tensor_b])
+
+def ConvBlock(inputs,n_filters,kernel_size=3,relu_=True):
+    net = Conv2D(n_filters, kernel_size=kernel_size, activation='relu', strides=(1,1), padding='same')(inputs)
+    return net
+
+def dilate(inputs,n_filters,dilation):
+    net = Conv2D(n_filters,kernel_size=3,strides=1,activation='elu',dilation_rate=(dilation,dilation),padding='same')(inputs)
+    return net
+
+def Dblock(net,n_filters=512):
+    dil_2 = dilate(net,n_filters,2)
+    dil_3 = dilate(dil_2, n_filters, 4)
+    dil_4 = dilate(dil_3, n_filters, 8)
+    dil_5 = dilate(dil_4, n_filters, 16)
+    dil_6 = dilate(dil_5, n_filters, 32)
+    
+    net = add(dil_2,dil_3)
+    net = add(net,dil_4)
+    net = add(net,dil_5)
+    net = add(net,dil_6)
+    #net = dil_2 + dil_3 + dil_4 + dil_5 + dil_6
+    return net
+
+def Upsample(inputs,rate=2):
+    return UpSampling2D(size=rate)(inputs)
+
+def UpBlock(inputs,n_filters):
+    net = UpSampling2D(2)(inputs)
+    net = Conv2D(n_filters,kernel_size=2,activation='relu',strides=1,padding='same')(net)
+    return net
+
+def RRBlock(inputs,n_filters):
+    net_1x1 = Conv2D(n_filters,kernel_size=1,activation='relu',strides=1,padding='same')(inputs)
+    net = RerBlock(net_1x1,n_filters)
+    net = RerBlock(net,n_filters)
+    return add(net,net_1x1)
+
+def shortcut(inputs, res, n_filters, equal=True):
+    if not equal:
+        net = Conv2D(n_filters, kernel_size=1,activation = 'relu',strides=1,padding ='same')(inputs)
+        net = add(res, net)
+    else:
+        net = add(inputs, res)
+    return net
+
+def RerBlock(inputs, n_filters, n=2):
+
+    net = ConvBlock(inputs, n_filters)
+    net = ConvBlock(net, n_filters)
+    net_1 = shortcut(inputs, net, n_filters, equal=False)
+
+    net = ConvBlock(net_1, n_filters)
+    net = ConvBlock(net, n_filters)
+    net_2 = shortcut(net_1, net, n_filters)
+
+    net = ConvBlock(net_2, n_filters)
+    net = ConvBlock(net, n_filters)
+    net_3 = shortcut(net_2, net, n_filters)
+
+    return net_3
+
+def attention(tensor,att_tensor,n_filters=512,kernel_size=1):
+    g1 = Conv2D(n_filters, kernel_size=kernel_size, activation='relu', strides=1, padding='same')(tensor)
+    x1 = Conv2D(n_filters, kernel_size=kernel_size, activation='relu', strides=1, padding='same')(att_tensor)
+    net = add(g1,x1)
+    #net = relu(net)
+    net = Conv2D(1, kernel_size=kernel_size, activation='sigmoid', strides=1, padding='same')(net)
+    net = multiply(net,att_tensor)
+    return net
+
+def build_model(input_size,  keep_prob=1.0, one_hot_label=False):
+    input_layer = Input(input_size)
+    n_filters = 64
+  
+    net = RRBlock(input_layer,n_filters)
+    skip1 = net
+    net = MaxPooling2D(pool_size=2,strides=2,padding='valid')(net)
+    
+    net = RRBlock(net,n_filters*2)
+    skip2 = net
+    net = MaxPooling2D(pool_size=(2, 2),strides=2)(net)
+    
+    net = RRBlock(net,n_filters*4)
+    skip3 = net
+    net = MaxPooling2D(pool_size=(2, 2),strides=2)(net)
+    
+    net = RRBlock(net,n_filters*8)
+    skip4 = net
+    net = MaxPooling2D(pool_size=(2, 2),strides=2)(net)
+    
+    net = Dblock(net,n_filters*16)
+    D = net
+    up_4 = UpBlock(net, 512)
+   
+    net = attention(up_4, skip4, 8 * n_filters)
+    net = concat(net, up_4)
+    net = RRBlock(net, n_filters * 8)
+
+    up_3 = UpBlock(net, n_filters * 4)
+    net = attention(up_3, skip3, 4 * n_filters)
+    net = concat(net, up_3)
+    net = RRBlock(net, n_filters * 4)
+
+    up_2 = UpBlock(net, n_filters * 2)
+    net = attention(up_2, skip2, 2 * n_filters)
+    net = concat(net, up_2)
+    net = RRBlock(net, n_filters * 2)
+
+    up_1 = UpBlock(net, n_filters)
+    net = attention(up_1, skip1, n_filters)
+    net = concat(net, up_1)
+    net = RRBlock(net, n_filters)
+
+    #net = Upsample(nei, rate=2)
+    net = Conv2D(1, kernel_size=1, activation='sigmoid',strides=1, padding='same')(net)
+    model = Model(inputs=input_layer,outputs=net)
+    #print(model)
+    return model
+
 
 ############################################################이미지 전처리#########################################################
 def get_img_arr(path, bands):
@@ -220,137 +355,6 @@ def generator_from_lists(images_path, masks_path, batch_size=32, shuffle = True,
                 images = []
                 masks = []
 
-
-#############################################모델################################################
-
-
-################################### metrics ########################################
-# dice score metric
-def dice_coef(y_true, y_pred, smooth=1e-6):
-    intersection = tf.reduce_sum(y_true * y_pred, axis=[1, 2, 3])
-    union = tf.reduce_sum(y_true, axis=[1, 2, 3]) + tf.reduce_sum(y_pred, axis=[1, 2, 3])
-    dice = tf.reduce_mean((2. * intersection + smooth) / (union + smooth), axis=0)
-    return dice
-
-# 픽셀 정확도 metric
-def pixel_accuracy(y_true, y_pred):
-    # 임계치 기준으로 이진화
-    y_pred = tf.cast(y_pred > THESHOLDS, tf.float32)
-    
-    # 논리적 AND 연산으로 정확한 예측의 수를 계산
-    correct_prediction = tf.logical_and(tf.equal(y_pred, 1), tf.equal(y_true, 1))
-    sum_n = tf.reduce_sum(tf.cast(correct_prediction, tf.float32))
-    
-    # 실제 True의 총 수
-    sum_t = tf.reduce_sum(y_true)
-    
-    # 조건부로 픽셀 정확도 계산
-    pixel_accuracy = tf.cond(sum_t > 0, lambda: sum_n / sum_t, lambda: tf.constant(0.0))
-    
-    return pixel_accuracy
-
-#miou metric
-def miou(y_true, y_pred, smooth=1e-6):
-    # 임계치 기준으로 이진화
-    y_pred = tf.cast(y_pred > THESHOLDS, tf.float32)
-    
-    intersection = tf.reduce_sum(y_true * y_pred, axis=[1, 2, 3])
-    union = tf.reduce_sum(y_true, axis=[1, 2, 3]) + tf.reduce_sum(y_pred, axis=[1, 2, 3]) - intersection
-    
-    # mIoU 계산
-    iou = (intersection + smooth) / (union + smooth)
-    miou = tf.reduce_mean(iou)
-    return miou
-
-#precision metric
-class Precision(tf.keras.metrics.Metric):
-    def __init__(self, name='precision', **kwargs):
-        super().__init__(name=name, **kwargs)
-        self.true_positives = self.add_weight(name='tp', initializer='zeros')
-        self.predicted_positives = self.add_weight(name='pp', initializer='zeros')
-
-    def update_state(self, y_true, y_pred, sample_weight=None):
-        y_pred = tf.round(y_pred)
-        true_positives = tf.reduce_sum(tf.cast(y_true * y_pred, tf.float32))
-        predicted_positives = tf.reduce_sum(y_pred)
-        
-        self.true_positives.assign_add(true_positives)
-        self.predicted_positives.assign_add(predicted_positives)
-
-    def result(self):
-        precision = self.true_positives / (self.predicted_positives + tf.keras.backend.epsilon())
-        return precision
-
-    def reset_states(self):
-        self.true_positives.assign(0)
-        self.predicted_positives.assign(0)
-        
-#recall metric
-class Recall(tf.keras.metrics.Metric):
-    def __init__(self, name='recall', **kwargs):
-        super().__init__(name=name, **kwargs)
-        self.true_positives = self.add_weight(name='tp', initializer='zeros')
-        self.actual_positives = self.add_weight(name='ap', initializer='zeros')
-
-    def update_state(self, y_true, y_pred, sample_weight=None):
-        y_pred = tf.round(y_pred)
-        true_positives = tf.reduce_sum(tf.cast(y_true * y_pred, tf.float32))
-        actual_positives = tf.reduce_sum(y_true)
-        
-        self.true_positives.assign_add(true_positives)
-        self.actual_positives.assign_add(actual_positives)
-
-    def result(self):
-        recall = self.true_positives / (self.actual_positives + tf.keras.backend.epsilon())
-        return recall
-
-    def reset_states(self):
-        self.true_positives.assign(0)
-        self.actual_positives.assign(0)
-
-#mAP metric
-class mAP(tf.keras.metrics.AUC):
-    def __init__(self, name='mAP', **kwargs):
-        super(mAP, self).__init__(name=name, curve='PR', **kwargs)
-        
-
-
-###################################################################################
-
-#band 이미지와 마스킹 이미지 확인
-def show_band_images(image_path, mask_path):
-    fig, axs = plt.subplots(3, 4, figsize=(20, 12))
-    axs = axs.ravel()
-    
-    for i in range(10):
-        img = rasterio.open(image_path).read(i+1).astype(np.float32) / MAX_PIXEL_VALUE
-        axs[i].imshow(img)
-        axs[i].set_title(f'Band {i+1}')
-        axs[i].axis('off')
-    
-    img = rasterio.open(mask_path).read(1).astype(np.float32) / MAX_PIXEL_VALUE
-    axs[10].imshow(img)
-    axs[10].set_title('Mask Image')
-    axs[10].axis('off')
-    axs[11].axis('off')
-    plt.title('Band images compare Mask image')
-    plt.tight_layout()
-    plt.show() 
-
-#밴드 조합 이미지 확인
-def show_bands_image(image_path, band = (0,0,0)):
-    img = rasterio.open(image_path).read(band).transpose((1, 2, 0))
-    img = np.float32(img)/MAX_PIXEL_VALUE
-    plt.figure(figsize=(10, 10))
-    plt.imshow(img)
-    plt.axis('off')  # 축 표시 없애기
-    plt.title(f'Band {band} combine image')
-    plt.show()
-    return img
-
-
-###################################################Field################################################
-
 # GPU 설정
 os.environ["CUDA_VISIBLE_DEVICES"] = str(CUDA_DEVICE)
 try:
@@ -373,8 +377,11 @@ test_meta = pd.read_csv('datasets/test_meta.csv')
 if not os.path.exists(OUTPUT_DIR):
     os.makedirs(OUTPUT_DIR)
 
+BACKBONE = 'resnet34'
+preprocess_input = sm.get_preprocessing(BACKBONE)
+
 # train : val = 8 : 2 나누기
-x_tr, x_val = train_test_split(train_meta, test_size=0.25, random_state=RANDOM_STATE)
+x_tr, x_val = train_test_split(train_meta, test_size=0.2, random_state=RANDOM_STATE)
 print(len(x_tr), len(x_val)) #26860 6715
 
 # train : val 지정 및 generator
@@ -384,17 +391,12 @@ masks_train = [os.path.join(MASKS_PATH, mask) for mask in x_tr['train_mask'] ]
 images_validation = [os.path.join(IMAGES_PATH, image) for image in x_val['train_img'] ]
 masks_validation = [os.path.join(MASKS_PATH, mask) for mask in x_val['train_mask'] ]
 
-
 train_generator = generator_from_lists(images_train, masks_train, batch_size=BATCH_SIZE, random_state=RANDOM_STATE)
 validation_generator = generator_from_lists(images_validation, masks_validation, batch_size=BATCH_SIZE, random_state=RANDOM_STATE)
 
-
 # model 불러오기
-# model = get_model(MODEL_NAME, input_height=IMAGE_SIZE[0], input_width=IMAGE_SIZE[1], n_filters=N_FILTERS, n_channels=N_CHANNELS)
-# model = sm.Unet('vgg16', classes=1, input_shape = (IMAGE_SIZE[0], IMAGE_SIZE[1], N_CHANNELS), activation='sigmoid', decoder_block_type='upsampling')
-model = sm.Unet('resnext50', classes=1, input_shape = (IMAGE_SIZE[0], IMAGE_SIZE[1], N_CHANNELS), activation='sigmoid', decoder_block_type='transpose')
-model.compile(optimizer = Adam(learning_rate=0.001), loss = 'binary_crossentropy', metrics = ['accuracy', dice_coef, pixel_accuracy, 
-                                                                           Precision(), Recall(), mAP(), miou])
+model = build_model(input_size=(IMAGE_SIZE[0],IMAGE_SIZE[1] ,N_CHANNELS))
+model.compile(optimizer = Adam(learning_rate=0.001), loss = 'binary_crossentropy', metrics = ['accuracy'])
 model.summary()
 
 

@@ -741,8 +741,8 @@ if not os.path.exists(OUTPUT_DIR):
     
 # for i in range(0,1000) :
 #     #데이터 확인
-    # show_band_images(IMAGES_PATH + f'train_img_{i}.tif', MASKS_PATH + f'train_mask_{i}.tif')
-#     show_bands_image(IMAGES_PATH + f'train_img_{i}.tif', (7,6,8))
+#     show_band_images(IMAGES_PATH + f'train_img_{i}.tif', MASKS_PATH + f'train_mask_{i}.tif')
+#     show_bands_image(IMAGES_PATH + f'train_img_{i}.tif', (7,6,2))
 
 #대비 확인
 # fig, axs = plt.subplots(3, 4, figsize=(20, 12))
