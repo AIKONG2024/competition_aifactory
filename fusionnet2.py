@@ -41,7 +41,6 @@ from sklearn.metrics import precision_score, recall_score, precision_recall_curv
 # import tensorflow_hub as hub
 import cv2
 import segmentation_models as sm
-from keras.metrics import MeanIoU 
 
 #랜럼시드 고정
 RANDOM_STATE = 42 # seed 고정
@@ -52,8 +51,8 @@ MAX_PIXEL_VALUE = 65535 # 이미지 정규화를 위한 픽셀 최대값
 
 N_FILTERS = 32 # 필터수 지정
 N_CHANNELS = 3 # channel 지정
-EPOCHS = 50 # 훈련 epoch 지정
-BATCH_SIZE = 10 # batch size 지정
+EPOCHS = 100 # 훈련 epoch 지정
+BATCH_SIZE = 32 # batch size 지정
 IMAGE_SIZE = (256, 256) # 이미지 크기 지정
 MODEL_NAME = 'unet' # 모델 이름
 INITIAL_EPOCH = 0 # 초기 epoch
@@ -73,7 +72,7 @@ OUTPUT_DIR = f'datasets/train_output/{save_name}/'
 WORKERS = 24
 
 # 조기종료
-EARLY_STOP_PATIENCE = 5
+EARLY_STOP_PATIENCE = 10
 
 # 중간 가중치 저장 이름
 CHECKPOINT_PERIOD = 1
@@ -139,134 +138,22 @@ def threadsafe_generator(f):
 
     return g
 
+def build_model(input_shape):
+    img_input = Input(shape=input_shape)
 
-def add(tensor_a,tensor_b):
-    return Add()([tensor_a,tensor_b])
+    ## Block 1
+    x = Conv2D(64, (3, 3), activation='relu', padding='same', name='block1_conv1')(img_input)
+    x = Conv2D(64, (3, 3), activation='relu', padding='same', name='block1_conv2')(x)
 
-def multiply(tensor_a,tensor_b):
-    return Multiply()([tensor_a,tensor_b])
+    # Block 2
+    x = Conv2D(32, (3, 3), activation='relu', padding='same', name='block2_conv1')(x)
+    x = Conv2D(32, (3, 3), activation='relu', padding='same', name='block2_conv2')(x)
+    # Out
+    o = (Conv2D(16, (3,3), activation='sigmoid' , padding='same', name="output"))(x)
 
-def concat(tensor_a,tensor_b):
-    return Concatenate(axis=3)([tensor_a,tensor_b])
+    model = Model(img_input, o)
 
-def ConvBlock(inputs,n_filters,kernel_size=3,relu_=True):
-    net = Conv2D(n_filters, kernel_size=kernel_size, activation='relu', strides=(1,1), padding='same')(inputs)
-    return net
-
-def dilate(inputs,n_filters,dilation):
-    net = Conv2D(n_filters,kernel_size=3,strides=1,activation='elu',dilation_rate=(dilation,dilation),padding='same')(inputs)
-    return net
-
-def Dblock(net,n_filters=512):
-    dil_2 = dilate(net,n_filters,2)
-    dil_3 = dilate(dil_2, n_filters, 4)
-    dil_4 = dilate(dil_3, n_filters, 8)
-    dil_5 = dilate(dil_4, n_filters, 16)
-    dil_6 = dilate(dil_5, n_filters, 32)
-    
-    net = add(dil_2,dil_3)
-    net = add(net,dil_4)
-    net = add(net,dil_5)
-    net = add(net,dil_6)
-    #net = dil_2 + dil_3 + dil_4 + dil_5 + dil_6
-    return net
-
-def Upsample(inputs,rate=2):
-    return UpSampling2D(size=rate)(inputs)
-
-def UpBlock(inputs,n_filters):
-    net = UpSampling2D(2)(inputs)
-    net = Conv2D(n_filters,kernel_size=2,activation='relu',strides=1,padding='same')(net)
-    return net
-
-def RRBlock(inputs,n_filters):
-    net_1x1 = Conv2D(n_filters,kernel_size=1,activation='relu',strides=1,padding='same')(inputs)
-    net = RerBlock(net_1x1,n_filters)
-    net = RerBlock(net,n_filters)
-    return add(net,net_1x1)
-
-def shortcut(inputs, res, n_filters, equal=True):
-    if not equal:
-        net = Conv2D(n_filters, kernel_size=1,activation = 'relu',strides=1,padding ='same')(inputs)
-        net = add(res, net)
-    else:
-        net = add(inputs, res)
-    return net
-
-def RerBlock(inputs, n_filters, n=2):
-
-    net = ConvBlock(inputs, n_filters)
-    net = ConvBlock(net, n_filters)
-    net_1 = shortcut(inputs, net, n_filters, equal=False)
-
-    net = ConvBlock(net_1, n_filters)
-    net = ConvBlock(net, n_filters)
-    net_2 = shortcut(net_1, net, n_filters)
-
-    net = ConvBlock(net_2, n_filters)
-    net = ConvBlock(net, n_filters)
-    net_3 = shortcut(net_2, net, n_filters)
-
-    return net_3
-
-def attention(tensor,att_tensor,n_filters=512,kernel_size=1):
-    g1 = Conv2D(n_filters, kernel_size=kernel_size, activation='relu', strides=1, padding='same')(tensor)
-    x1 = Conv2D(n_filters, kernel_size=kernel_size, activation='relu', strides=1, padding='same')(att_tensor)
-    net = add(g1,x1)
-    #net = relu(net)
-    net = Conv2D(1, kernel_size=kernel_size, activation='sigmoid', strides=1, padding='same')(net)
-    net = multiply(net,att_tensor)
-    return net
-
-def build_model(input_size,  keep_prob=1.0, one_hot_label=False):
-    input_layer = Input(input_size)
-    n_filters = 64
-  
-    net = RRBlock(input_layer,n_filters)
-    skip1 = net
-    net = MaxPooling2D(pool_size=2,strides=2,padding='valid')(net)
-    
-    net = RRBlock(net,n_filters*2)
-    skip2 = net
-    net = MaxPooling2D(pool_size=(2, 2),strides=2)(net)
-    
-    net = RRBlock(net,n_filters*4)
-    skip3 = net
-    net = MaxPooling2D(pool_size=(2, 2),strides=2)(net)
-    
-    net = RRBlock(net,n_filters*8)
-    skip4 = net
-    net = MaxPooling2D(pool_size=(2, 2),strides=2)(net)
-    
-    net = Dblock(net,n_filters*16)
-    D = net
-    up_4 = UpBlock(net, 512)
-   
-    net = attention(up_4, skip4, 8 * n_filters)
-    net = concat(net, up_4)
-    net = RRBlock(net, n_filters * 8)
-
-    up_3 = UpBlock(net, n_filters * 4)
-    net = attention(up_3, skip3, 4 * n_filters)
-    net = concat(net, up_3)
-    net = RRBlock(net, n_filters * 4)
-
-    up_2 = UpBlock(net, n_filters * 2)
-    net = attention(up_2, skip2, 2 * n_filters)
-    net = concat(net, up_2)
-    net = RRBlock(net, n_filters * 2)
-
-    up_1 = UpBlock(net, n_filters)
-    net = attention(up_1, skip1, n_filters)
-    net = concat(net, up_1)
-    net = RRBlock(net, n_filters)
-
-    #net = Upsample(nei, rate=2)
-    net = Conv2D(1, kernel_size=1, activation='sigmoid',strides=1, padding='same')(net)
-    model = Model(inputs=input_layer,outputs=net)
-    #print(model)
     return model
-
 
 #miou metric
 def miou(y_true, y_pred, smooth=1e-6):
@@ -320,7 +207,7 @@ def enhance_image_contrast(image):
     l_clahe = clahe.apply(l)
     
     # 밝기조절 - 어둡게
-    l_clahe = np.clip(l_clahe * 1, 0, 255).astype(l.dtype)
+    l_clahe = np.clip(l_clahe * 0.9, 0, 255).astype(l.dtype)
     
     # 채널 합치기 및 색공간 변환
     enhanced_lab = cv2.merge((l_clahe, a, b))
@@ -351,13 +238,13 @@ def generator_from_lists(images_path, masks_path, batch_size=32, shuffle = True,
 
         for img_path, mask_path in zip(images_path, masks_path):
 
-            img = fopen_image(img_path, bands=(7,6,2))
+            img = fopen_image(img_path, bands=(7,6,8))
             mask = fopen_mask(mask_path)
             
             # #대비조절
-            # img = np.uint8(img * 255)  # 이미지를 8-bit 정수 타입으로 변환
-            # img = enhance_image_contrast(img)
-            # img = img.astype(np.float32) / 255. #다시 32 float 타입 변환
+            img = np.uint8(img * 255)  # 이미지를 8-bit 정수 타입으로 변환
+            img = enhance_image_contrast(img)
+            img = img.astype(np.float32) / 255. #다시 32 float 타입 변환
             
             
             images.append(img)
@@ -408,8 +295,8 @@ train_generator = generator_from_lists(images_train, masks_train, batch_size=BAT
 validation_generator = generator_from_lists(images_validation, masks_validation, batch_size=BATCH_SIZE, random_state=RANDOM_STATE)
 
 # model 불러오기
-model = build_model(input_size=(IMAGE_SIZE[0],IMAGE_SIZE[1] ,N_CHANNELS))
-model.compile(optimizer = Adam(learning_rate=0.001), loss = 'binary_crossentropy', metrics = ['accuracy', mio])
+model = build_model(input_shape=(IMAGE_SIZE[0],IMAGE_SIZE[1] ,N_CHANNELS))
+model.compile(optimizer = Adam(learning_rate=0.001), loss = 'binary_crossentropy', metrics = ['accuracy', miou])
 model.summary()
 
 
@@ -417,8 +304,8 @@ model.summary()
 es = EarlyStopping(monitor='val_miou', mode='max', verbose=1, patience=EARLY_STOP_PATIENCE, restore_best_weights=True)
 checkpoint = ModelCheckpoint(os.path.join(OUTPUT_DIR, CHECKPOINT_MODEL_NAME), monitor='val_miou', verbose=1,
 save_best_only=True, mode='max', period=CHECKPOINT_PERIOD)
-rlr = ReduceLROnPlateau(monitor='val_miou',
-                        patience=3, #early stopping 의 절반
+rlr = ReduceLROnPlateau(monitor='val_loss',
+                        patience=8, #early stopping 의 절반
                         mode = 'auto',
                         verbose= 1,
                         factor=0.5 #learning rate 를 반으로 줄임.
@@ -442,3 +329,4 @@ print('가중치 저장')
 model_weights_output = os.path.join(OUTPUT_DIR, FINAL_WEIGHTS_OUTPUT)
 model.save_weights(model_weights_output)
 print("저장된 가중치 명: {}".format(model_weights_output))
+
