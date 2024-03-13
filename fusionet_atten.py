@@ -41,6 +41,7 @@ from sklearn.metrics import precision_score, recall_score, precision_recall_curv
 # import tensorflow_hub as hub
 import cv2
 import segmentation_models as sm
+from keras.metrics import MeanIoU 
 
 #랜럼시드 고정
 RANDOM_STATE = 42 # seed 고정
@@ -51,8 +52,8 @@ MAX_PIXEL_VALUE = 65535 # 이미지 정규화를 위한 픽셀 최대값
 
 N_FILTERS = 32 # 필터수 지정
 N_CHANNELS = 3 # channel 지정
-EPOCHS = 100 # 훈련 epoch 지정
-BATCH_SIZE = 2 # batch size 지정
+EPOCHS = 50 # 훈련 epoch 지정
+BATCH_SIZE = 10 # batch size 지정
 IMAGE_SIZE = (256, 256) # 이미지 크기 지정
 MODEL_NAME = 'unet' # 모델 이름
 INITIAL_EPOCH = 0 # 초기 epoch
@@ -72,7 +73,7 @@ OUTPUT_DIR = f'datasets/train_output/{save_name}/'
 WORKERS = 24
 
 # 조기종료
-EARLY_STOP_PATIENCE = 10
+EARLY_STOP_PATIENCE = 5
 
 # 중간 가중치 저장 이름
 CHECKPOINT_PERIOD = 1
@@ -105,18 +106,18 @@ class CometLogger(Callback):
             'val_loss': logs['val_loss'],
             'accuracy': logs['accuracy'],
             'val_accuracy': logs['val_accuracy'],
-            'dice_coef': logs['dice_coef'],
-            'val_dice_coef': logs['val_dice_coef'],
-            'pixel_accuracy': logs['pixel_accuracy'],
-            'val_pixel_accuracy': logs['val_pixel_accuracy'],
+            # 'dice_coef': logs['dice_coef'],
+            # 'val_dice_coef': logs['val_dice_coef'],
+            # 'pixel_accuracy': logs['pixel_accuracy'],
+            # 'val_pixel_accuracy': logs['val_pixel_accuracy'],
             'miou': logs['miou'],
             'val_miou': logs['val_miou'],
-            'precision': logs['precision'],
-            'recall': logs['recall'],
-            'val_precision': logs['val_precision'],
-            'val_recall': logs['val_recall'],
-            'mAP': logs['mAP'],
-            'val_mAP': logs['val_mAP']
+            # 'precision': logs['precision'],
+            # 'recall': logs['recall'],
+            # 'val_precision': logs['val_precision'],
+            # 'val_recall': logs['val_recall'],
+            # 'mAP': logs['mAP'],
+            # 'val_mAP': logs['val_mAP']
         })
 
 class threadsafe_iter:
@@ -319,7 +320,7 @@ def enhance_image_contrast(image):
     l_clahe = clahe.apply(l)
     
     # 밝기조절 - 어둡게
-    l_clahe = np.clip(l_clahe * 0.9, 0, 255).astype(l.dtype)
+    l_clahe = np.clip(l_clahe * 1, 0, 255).astype(l.dtype)
     
     # 채널 합치기 및 색공간 변환
     enhanced_lab = cv2.merge((l_clahe, a, b))
@@ -350,13 +351,13 @@ def generator_from_lists(images_path, masks_path, batch_size=32, shuffle = True,
 
         for img_path, mask_path in zip(images_path, masks_path):
 
-            img = fopen_image(img_path, bands=(7,6,8))
+            img = fopen_image(img_path, bands=(7,6,2))
             mask = fopen_mask(mask_path)
             
             # #대비조절
-            img = np.uint8(img * 255)  # 이미지를 8-bit 정수 타입으로 변환
-            img = enhance_image_contrast(img)
-            img = img.astype(np.float32) / 255. #다시 32 float 타입 변환
+            # img = np.uint8(img * 255)  # 이미지를 8-bit 정수 타입으로 변환
+            # img = enhance_image_contrast(img)
+            # img = img.astype(np.float32) / 255. #다시 32 float 타입 변환
             
             
             images.append(img)
@@ -408,7 +409,7 @@ validation_generator = generator_from_lists(images_validation, masks_validation,
 
 # model 불러오기
 model = build_model(input_size=(IMAGE_SIZE[0],IMAGE_SIZE[1] ,N_CHANNELS))
-model.compile(optimizer = Adam(learning_rate=0.001), loss = 'binary_crossentropy', metrics = ['accuracy', miou])
+model.compile(optimizer = Adam(learning_rate=0.001), loss = 'binary_crossentropy', metrics = ['accuracy', MeanIoU(num_classes=1)])
 model.summary()
 
 
@@ -416,8 +417,8 @@ model.summary()
 es = EarlyStopping(monitor='val_miou', mode='max', verbose=1, patience=EARLY_STOP_PATIENCE, restore_best_weights=True)
 checkpoint = ModelCheckpoint(os.path.join(OUTPUT_DIR, CHECKPOINT_MODEL_NAME), monitor='val_miou', verbose=1,
 save_best_only=True, mode='max', period=CHECKPOINT_PERIOD)
-rlr = ReduceLROnPlateau(monitor='val_loss',
-                        patience=8, #early stopping 의 절반
+rlr = ReduceLROnPlateau(monitor='val_miou',
+                        patience=3, #early stopping 의 절반
                         mode = 'auto',
                         verbose= 1,
                         factor=0.5 #learning rate 를 반으로 줄임.
