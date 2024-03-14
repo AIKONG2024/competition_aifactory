@@ -46,8 +46,8 @@ MAX_PIXEL_VALUE = 65535 # 이미지 정규화를 위한 픽셀 최대값
 
 N_FILTERS = 16 # 필터수 지정
 N_CHANNELS = 3 # channel 지정
-EPOCHS = 200 # 훈련 epoch 지정
-BATCH_SIZE = 32 # batch size 지정
+EPOCHS = 300 # 훈련 epoch 지정
+BATCH_SIZE = 16 # batch size 지정
 IMAGE_SIZE = (256, 256) # 이미지 크기 지정
 MODEL_NAME = 'unet' # 모델 이름
 INITIAL_EPOCH = 0 # 초기 epoch
@@ -170,45 +170,6 @@ def enhance_image_contrast(image):
     
     return enhanced_image
 
-# @threadsafe_generator
-# def generator_from_lists(images_path, masks_path, batch_size=32, shuffle = True, random_state=None):
-
-#     images = []
-#     masks = []
-
-#     fopen_image = get_img_arr
-#     fopen_mask = get_mask_arr
-        
-#     i = 0
-#     # 데이터 shuffle
-#     while True:
-
-#         if shuffle:
-#             if random_state is None:
-#                 images_path, masks_path = shuffle_lists(images_path, masks_path)
-#             else:
-#                 images_path, masks_path = shuffle_lists(images_path, masks_path, random_state= random_state + i)
-#                 i += 1
-
-
-#         for img_path, mask_path in zip(images_path, masks_path):
-
-#             img = fopen_image(img_path, bands=(7,6,2))
-#             mask = fopen_mask(mask_path)
-            
-#             # #대비조절
-#             # img = np.uint8(img * 255)  # 이미지를 8-bit 정수 타입으로 변환
-#             # img = enhance_image_contrast(img)
-#             # img = img.astype(np.float32) / 255. #다시 32 float 타입 변환
-            
-            
-#             images.append(img)
-#             masks.append(mask)
-
-#             if len(images) >= batch_size:
-#                 yield (np.array(images), np.array(masks))
-#                 images = []
-#                 masks = []
 def shuffle_lists(images_path, masks_path, random_state=None):
     if random_state is not None:
         np.random.seed(random_state)
@@ -218,33 +179,23 @@ def shuffle_lists(images_path, masks_path, random_state=None):
     return list(shuffled_images_path), list(shuffled_masks_path)
 
 def rotate_image(image, angle):
-    """이미지를 주어진 각도로 회전합니다."""
     height, width = image.shape[:2]
     rotation_matrix = cv2.getRotationMatrix2D((width/2, height/2), angle, 1)
     rotated_image = cv2.warpAffine(image, rotation_matrix, (width, height))
+    if len(image.shape) == 2 or image.shape[2] == 1:
+        rotated_image = rotated_image[:, :, np.newaxis]
     return rotated_image
 
-def random_crop(image, mask, crop_size):
-    """이미지와 마스크를 무작위로 자릅니다."""
-    height, width = image.shape[:2]
-    x = random.randint(0, max(0, width - crop_size))
-    y = random.randint(0, max(0, height - crop_size))
-    cropped_image = image[y:y+crop_size, x:x+crop_size]
-    cropped_mask = mask[y:y+crop_size, x:x+crop_size]
-    return cropped_image, cropped_mask
-
 def adjust_brightness(image, factor=1.2):
-    """이미지의 광도를 조절합니다."""
-    hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)  # HSV로 변환
+    hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
     hsv = np.array(hsv, dtype=np.float64)
-    hsv[:, :, 2] = hsv[:, :, 2] * factor  # V 채널(밝기) 조절
-    hsv[:, :, 2][hsv[:, :, 2] > 255] = 255  # 최대값을 넘지 않도록 조절
+    hsv[:, :, 2] = hsv[:, :, 2] * factor
+    hsv[:, :, 2][hsv[:, :, 2] > 255] = 255
     hsv = np.array(hsv, dtype=np.uint8)
-    image = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)  # RGB로 되돌림
+    image = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
     return image
 
 def add_noise(image):
-    """이미지에 무작위 노이즈를 추가합니다."""
     mean = 0
     var = 10
     sigma = var ** 0.5
@@ -252,91 +203,70 @@ def add_noise(image):
     noisy_image = np.clip(image + gauss, 0, 255).astype(np.uint8)
     return noisy_image
 
-def augment_image(image, mask):
-    """이미지와 마스크에 여러 증강 기법을 적용합니다."""
-    # # 50% 확률로 좌우 반전
-    # if random.random() > 0.5:
-    #     image = np.fliplr(image)
-    #     mask = np.fliplr(mask)
+def augment_image(image, mask, IMAGE_SIZE=(256, 256)):
+    per = 0.4
+    # 확률적으로 이미지 변환 적용
+    if random.random() < per:
+        image = np.fliplr(image)
+        mask = np.fliplr(mask)
     
-    # # 50% 확률로 상하 반전
-    # if random.random() > 0.5:
-    #     image = np.flipud(image)
-    #     mask = np.flipud(mask)
+    if random.random() < per:
+        image = np.flipud(image)
+        mask = np.flipud(mask)
     
-    # 50% 확률로 이미지 회전
-    # if random.random() > 0.5:
-    #     angle = random.choice([90, 180, 270])  # 90도 단위로 회전
-    #     image = rotate_image(image, angle)
-    #     mask = rotate_image(mask, angle)
+    if random.random() < per:
+        angle = random.choice([90, 180, 270])
+        image = rotate_image(image, angle)
+        mask = rotate_image(mask, angle)
     
-    # # 50% 확률로 광도 조절
-    # if random.random() > 0.5:
-    #     factor = random.uniform(0.9, 1.1)  # 광도 조절 요소
-    #     image = adjust_brightness(image, factor=factor)
+    if random.random() < per:
+        factor = random.uniform(0.9, 1.1)
+        image = adjust_brightness(image, factor=factor)
     
-    # 50% 확률로 노이즈 추가
-    # if random.random() > 0.5:
-    #     image = add_noise(image)
-    
-    # 이미지회전
-    angle = random.choice([90, 180, 270])  # 90도 단위로 회전
-    image = rotate_image(image, angle)
-    mask = rotate_image(mask, angle)
-    
-    # 무작위로 자르기 적용
-    crop_size = random.randint(int(image.shape[0] * 0.85), image.shape[0])  # 최소 80% 크기로 자름
-    image, mask = random_crop(image, mask, crop_size)
+    if random.random() < per:
+        image = add_noise(image)
     
     return image, mask
 
 @threadsafe_generator
-def generator_from_lists(images_path, masks_path, batch_size=32, shuffle=True, random_state=None):
-    print("==데이터 증강 시작==")
-    augmented_images_path = []
-    augmented_masks_path = []
+def generator_from_lists(images_path, masks_path, batch_size=32, shuffle = True, random_state=None):
 
-    # 증강할 이미지의 인덱스 결정 10%
-    augment_indices = np.random.choice(len(images_path), size=int(len(images_path) * 0.1), replace=False)
-    
-    # 증강된 이미지와 원본 이미지를 모두 포함하는 새로운 리스트 생성
-    for idx in range(len(images_path)):
-        
-        img_path = images_path[idx]
-        mask_path = masks_path[idx]
-        
-        img = get_img_arr(img_path, bands=(7,6,2))
-        mask = get_mask_arr(mask_path)
-
-        augmented_images_path.append(img)
-        augmented_masks_path.append(mask)
-
-        # 증강 인덱스에 해당하는 경우, 증강된 이미지/마스크도 추가
-        if idx in augment_indices:
-            print(f"증강중...{idx}/ {len(images_path)}")
-            img_aug, mask_aug = augment_image(img, mask)
-            augmented_images_path.append(img_aug)
-            augmented_masks_path.append(mask_aug)
-
-    # 새로운 리스트를 사용하여 배치 생성
     images = []
     masks = []
-    total_length = len(augmented_images_path)
-    indices = list(range(total_length))
-    if shuffle:
-        np.random.shuffle(indices)
 
-    for idx in indices:
-        images.append(augmented_images_path[idx])
-        masks.append(augmented_masks_path[idx])
+    fopen_image = get_img_arr
+    fopen_mask = get_mask_arr
+        
+    i = 0
+    # 데이터 shuffle
+    while True:
 
-        if len(images) >= batch_size:
-            yield (np.array(images), np.array(masks))
-            images = []
-            masks = []
+        if shuffle:
+            if random_state is None:
+                images_path, masks_path = shuffle_lists(images_path, masks_path)
+            else:
+                images_path, masks_path = shuffle_lists(images_path, masks_path, random_state= random_state + i)
+                i += 1
 
-    if images and masks:  # 남은 데이터 처리
-        yield (np.array(images), np.array(masks))
+
+        for img_path, mask_path in zip(images_path, masks_path):
+
+            img = fopen_image(img_path, bands=(7,6,2))
+            mask = fopen_mask(mask_path)
+            
+            # #대비조절
+            # img = np.uint8(img * 255)  # 이미지를 8-bit 정수 타입으로 변환
+            # img = enhance_image_contrast(img)
+            # img = img.astype(np.float32) / 255. #다시 32 float 타입 변환
+            img, mask = augment_image(img, mask)
+            images.append(img)
+            masks.append(mask)
+
+            if len(images) >= batch_size:
+                yield (np.array(images), np.array(masks))
+                images = []
+                masks = []
+
 
 
 #############################################모델################################################
@@ -722,9 +652,10 @@ def get_unet_small2 (nClasses, input_height=128, input_width=128, n_filters = 16
     u3 = Dropout(dropout)(u3)
     c3 = conv2d_block(u3, n_filters * 1, kernel_size = 3, batchnorm = batchnorm)
 
-    outputs = Conv2D(nClasses, (1, 1), activation='relu')(c3)
+    outputs = Conv2D(nClasses, (1, 1), activation='sigmoid')(c3)
     model = Model(inputs=[input_img], outputs=[outputs])
     return model
+
 ################################### metrics ########################################
 # dice score metric
 # def dice_coef(y_true, y_pred, smooth=1e-6):
@@ -878,7 +809,8 @@ validation_generator = generator_from_lists(images_validation, masks_validation,
 # model = sm.Unet('vgg16', classes=1, input_shape = (IMAGE_SIZE[0], IMAGE_SIZE[1], N_CHANNELS), activation='sigmoid', decoder_block_type='upsampling')
 model = get_unet_small2(nClasses=1,  input_height=IMAGE_SIZE[0], input_width=IMAGE_SIZE[1], n_filters=N_FILTERS, n_channels=N_CHANNELS)
 # model.compile(optimizer=Adam(lr=1e-5), loss=[dice_coef_loss], metrics=['accuracy', dice_coef, miou])
-model.compile(optimizer=Adam(lr=1e-3), loss= sm.losses.binary_focal_loss, metrics=['accuracy', dice_coef, miou])
+model.compile(optimizer=Adam(lr=1e-3), loss= 'binary_crossentropy', metrics=['accuracy', dice_coef, miou])
+sm.Unet
 # model.compile(optimizer = Adam(learning_rate=5e-5), loss = sm.losses.binary_focal_loss, metrics = ['accuracy', miou])
 model.summary()
 
