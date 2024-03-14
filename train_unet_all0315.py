@@ -31,7 +31,7 @@ from keras import backend as K
 from sklearn.model_selection import train_test_split
 import joblib
 import time
-from keras.callbacks import Callback
+from keras.callbacks import Callback, ReduceLROnPlateau
 from sklearn.metrics import precision_score, recall_score, precision_recall_curve ,auc
 from skimage.transform import resize
 # import tensorflow_hub as hub
@@ -46,9 +46,9 @@ MAX_PIXEL_VALUE = 65535 # 이미지 정규화를 위한 픽셀 최대값
 
 N_FILTERS = 32 # 필터수 지정
 N_CHANNELS = 3 # channel 지정
-EPOCHS = 100 # 훈련 epoch 지정
-BATCH_SIZE = 32 # batch size 지정
-IMAGE_SIZE = (512, 512) # 이미지 크기 지정
+EPOCHS = 300 # 훈련 epoch 지정
+BATCH_SIZE = 4 # batch size 지정
+IMAGE_SIZE = (256, 256) # 이미지 크기 지정
 MODEL_NAME = 'unet' # 모델 이름
 INITIAL_EPOCH = 0 # 초기 epoch
 THESHOLDS = 0.25
@@ -64,10 +64,10 @@ MASKS_PATH = 'datasets/train_mask/'
 
 # 가중치 저장 위치
 OUTPUT_DIR = f'datasets/train_output/{save_name}/'
-WORKERS = 24
+WORKERS = 32
 
 # 조기종료
-EARLY_STOP_PATIENCE = 7
+EARLY_STOP_PATIENCE = 15
 
 # 중간 가중치 저장 이름
 CHECKPOINT_PERIOD = 1
@@ -100,18 +100,8 @@ class CometLogger(Callback):
             'val_loss': logs['val_loss'],
             'accuracy': logs['accuracy'],
             'val_accuracy': logs['val_accuracy'],
-            'dice_coef': logs['dice_coef'],
-            'val_dice_coef': logs['val_dice_coef'],
-            'pixel_accuracy': logs['pixel_accuracy'],
-            'val_pixel_accuracy': logs['val_pixel_accuracy'],
             'miou': logs['miou'],
             'val_miou': logs['val_miou'],
-            'precision': logs['precision'],
-            'recall': logs['recall'],
-            'val_precision': logs['val_precision'],
-            'val_recall': logs['val_recall'],
-            'mAP': logs['mAP'],
-            'val_mAP': logs['val_mAP']
         })
 
 class threadsafe_iter:
@@ -139,16 +129,13 @@ def get_img_arr(path, bands):
         img = rasterio.open(path).read(bands).transpose((1, 2, 0))
     else:
         img = rasterio.open(path).read().transpose((1, 2, 0))
-    img = resize(img, 512., anti_aliasing=True)
     img = np.float32(img) / MAX_PIXEL_VALUE
     return img
 
 def get_mask_arr(path):
     img = rasterio.open(path).read().transpose((1, 2, 0))
-    img = resize(img, 512., anti_aliasing=True)
     seg = np.float32(img)
     return seg
-
 # Data Augmentation 설정
 def get_image_data_gen():
     #데이터가 이미지 끝부분에 걸쳐있는 경우가 많아 세밀한 조정 필요
@@ -160,6 +147,85 @@ def get_image_data_gen():
     image_datagen = ImageDataGenerator(**data_gen_args)
     mask_datagen = ImageDataGenerator(**data_gen_args)
     return image_datagen, mask_datagen
+
+#색채 대비
+def enhance_image_contrast(image):
+    # CLAHE 객체 생성
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
+    
+    # 이미지를 LAB 색공간으로 변환
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    
+    # L 채널에 CLAHE 적용
+    l_clahe = clahe.apply(l)
+    
+    # 밝기조절 - 어둡게
+    l_clahe = np.clip(l_clahe * 0.3, 0, 255).astype(l.dtype)
+    
+    # 채널 합치기 및 색공간 변환
+    enhanced_lab = cv2.merge((l_clahe, a, b))
+    enhanced_image = cv2.cvtColor(enhanced_lab, cv2.COLOR_LAB2BGR)
+    
+    return enhanced_image
+
+def shuffle_lists(images_path, masks_path, random_state=None):
+    if random_state is not None:
+        np.random.seed(random_state)
+    combined = list(zip(images_path, masks_path))
+    np.random.shuffle(combined)
+    shuffled_images_path, shuffled_masks_path = zip(*combined)
+    return list(shuffled_images_path), list(shuffled_masks_path)
+
+def rotate_image(image, angle):
+    height, width = image.shape[:2]
+    rotation_matrix = cv2.getRotationMatrix2D((width/2, height/2), angle, 1)
+    rotated_image = cv2.warpAffine(image, rotation_matrix, (width, height))
+    if len(image.shape) == 2 or image.shape[2] == 1:
+        rotated_image = rotated_image[:, :, np.newaxis]
+    return rotated_image
+
+def adjust_brightness(image, factor=1.2):
+    hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
+    hsv = np.array(hsv, dtype=np.float64)
+    hsv[:, :, 2] = hsv[:, :, 2] * factor
+    hsv[:, :, 2][hsv[:, :, 2] > 255] = 255
+    hsv = np.array(hsv, dtype=np.uint8)
+    image = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
+    return image
+
+def add_noise(image):
+    mean = 0
+    var = 10
+    sigma = var ** 0.5
+    gauss = np.random.normal(mean, sigma, image.shape)
+    noisy_image = np.clip(image + gauss, 0, 255).astype(np.uint8)
+    return noisy_image
+
+def augment_image(image, mask, IMAGE_SIZE=(256, 256)):
+    per = 0.4
+    # 확률적으로 이미지 변환 적용
+    if random.random() < per:
+        image = np.fliplr(image)
+        mask = np.fliplr(mask)
+    
+    if random.random() < per:
+        image = np.flipud(image)
+        mask = np.flipud(mask)
+    
+    if random.random() < per:
+        angle = random.choice([90, 180, 270])
+        image = rotate_image(image, angle)
+        mask = rotate_image(mask, angle)
+    
+    if random.random() < per:
+        factor = random.uniform(0.9, 1.1)
+        image = adjust_brightness(image, factor=factor)
+    
+    if random.random() < per:
+        image = add_noise(image)
+    return image, mask
+
 
 #색채 대비
 def enhance_image_contrast(image):
@@ -205,14 +271,14 @@ def generator_from_lists(images_path, masks_path, batch_size=32, shuffle = True,
 
         for img_path, mask_path in zip(images_path, masks_path):
 
-            img = fopen_image(img_path, bands=(7,6,8))
+            img = fopen_image(img_path, bands=(7,6,2))
             mask = fopen_mask(mask_path)
             
             # #대비조절
-            img = np.uint8(img * 255)  # 이미지를 8-bit 정수 타입으로 변환
-            img = enhance_image_contrast(img)
-            img = img.astype(np.float32) / 255. #다시 32 float 타입 변환
-            
+            # img = np.uint8(img * 255)  # 이미지를 8-bit 정수 타입으로 변환
+            # img = enhance_image_contrast(img)
+            # img = img.astype(np.float32) / 255. #다시 32 float 타입 변환
+            img, mask = augment_image(img, mask)
             
             images.append(img)
             masks.append(mask)
@@ -682,6 +748,23 @@ class mAP(tf.keras.metrics.AUC):
     def __init__(self, name='mAP', **kwargs):
         super(mAP, self).__init__(name=name, curve='PR', **kwargs)
         
+def ohem_loss(y_true, y_pred, n_hard_examples=20):
+    """
+    Online Hard Example Mining (OHEM) 손실 함수.
+    
+    y_true: 실제 레이블.
+    y_pred: 예측된 확률 또는 레이블.
+    n_hard_examples: 고려할 하드 예제의 수.
+    """
+    # 손실 계산
+    losses = tf.keras.losses.binary_crossentropy(y_true, y_pred)
+    
+    # 손실이 큰 순서로 예제를 선택
+    _, indices = tf.nn.top_k(losses, k=n_hard_examples)
+    
+    # 하드 예제에 대한 손실만 평균하여 반환
+    hard_losses = tf.gather(losses, indices)
+    return tf.reduce_mean(hard_losses)        
 
 
 ###################################################################################
@@ -781,8 +864,7 @@ validation_generator = generator_from_lists(images_validation, masks_validation,
 
 # model 불러오기
 model = get_model(MODEL_NAME, input_height=IMAGE_SIZE[0], input_width=IMAGE_SIZE[1], n_filters=N_FILTERS, n_channels=N_CHANNELS)
-model.compile(optimizer = Adam(), loss = 'binary_crossentropy', metrics = ['accuracy', dice_coef, pixel_accuracy, 
-                                                                           Precision(), Recall(), mAP(), miou])
+model.compile(optimizer = Adam(learning_rate=0.001), loss =ohem_loss, metrics = ['accuracy', dice_coef, miou])
 model.summary()
 
 
@@ -790,7 +872,12 @@ model.summary()
 es = EarlyStopping(monitor='val_miou', mode='max', verbose=1, patience=EARLY_STOP_PATIENCE, restore_best_weights=True)
 checkpoint = ModelCheckpoint(os.path.join(OUTPUT_DIR, CHECKPOINT_MODEL_NAME), monitor='val_miou', verbose=1,
 save_best_only=True, mode='max', period=CHECKPOINT_PERIOD)
-
+rlr = ReduceLROnPlateau(monitor='val_miou',
+                        patience=7, #early stopping 의 절반
+                        mode = 'max',
+                        verbose= 1,
+                        factor=0.5 #learning rate 를 반으로 줄임.
+                        )
 
 print('---model 훈련 시작---')
 history = model.fit_generator(
@@ -798,7 +885,7 @@ history = model.fit_generator(
     steps_per_epoch=len(images_train) // BATCH_SIZE,
     validation_data=validation_generator,
     validation_steps=len(images_validation) // BATCH_SIZE,
-    callbacks=[checkpoint, es, CometLogger()],
+    callbacks=[checkpoint, es, CometLogger(),rlr],
     epochs=EPOCHS,
     workers=WORKERS,
     initial_epoch=INITIAL_EPOCH
