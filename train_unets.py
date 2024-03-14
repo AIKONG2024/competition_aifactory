@@ -46,7 +46,7 @@ MAX_PIXEL_VALUE = 65535 # 이미지 정규화를 위한 픽셀 최대값
 
 N_FILTERS = 16 # 필터수 지정
 N_CHANNELS = 3 # channel 지정
-EPOCHS = 200 # 훈련 epoch 지정
+EPOCHS = 300 # 훈련 epoch 지정
 BATCH_SIZE = 32 # batch size 지정
 IMAGE_SIZE = (256, 256) # 이미지 크기 지정
 MODEL_NAME = 'unet' # 모델 이름
@@ -705,6 +705,87 @@ def conv2d_block(input_tensor, n_filters, kernel_size = 3, batchnorm = True):
         x = BatchNormalization()(x)
     x = Activation("relu")(x)
     return x
+
+################################################################################################################
+def get_unet(nClasses, input_height=256, input_width=256, n_filters = 16, dropout = 0.1, batchnorm = True, n_channels=10):
+    input_img = Input(shape=(input_height,input_width, n_channels))
+
+    # contracting path
+    c1 = conv2d_block(input_img, n_filters=n_filters*1, kernel_size=3, batchnorm=batchnorm)
+    p1 = MaxPooling2D((2, 2)) (c1)
+    p1 = Dropout(dropout)(p1)
+
+    c2 = conv2d_block(p1, n_filters=n_filters*2, kernel_size=3, batchnorm=batchnorm)
+    p2 = MaxPooling2D((2, 2)) (c2)
+    p2 = Dropout(dropout)(p2)
+
+    c3 = conv2d_block(p2, n_filters=n_filters*4, kernel_size=3, batchnorm=batchnorm)
+    p3 = MaxPooling2D((2, 2)) (c3)
+    p3 = Dropout(dropout)(p3)
+
+    c4 = conv2d_block(p3, n_filters=n_filters*8, kernel_size=3, batchnorm=batchnorm)
+    p4 = MaxPooling2D(pool_size=(2, 2)) (c4)
+    p4 = Dropout(dropout)(p4)
+
+    c5 = conv2d_block(p4, n_filters=n_filters*16, kernel_size=3, batchnorm=batchnorm)
+
+    # expansive path
+    u6 = Conv2DTranspose(n_filters*8, (3, 3), strides=(2, 2), padding='same') (c5)
+    u6 = concatenate([u6, c4])
+    u6 = Dropout(dropout)(u6)
+    c6 = conv2d_block(u6, n_filters=n_filters*8, kernel_size=3, batchnorm=batchnorm)
+
+    u7 = Conv2DTranspose(n_filters*4, (3, 3), strides=(2, 2), padding='same') (c6)
+    u7 = concatenate([u7, c3])
+    u7 = Dropout(dropout)(u7)
+    c7 = conv2d_block(u7, n_filters=n_filters*4, kernel_size=3, batchnorm=batchnorm)
+
+    u8 = Conv2DTranspose(n_filters*2, (3, 3), strides=(2, 2), padding='same') (c7)
+    u8 = concatenate([u8, c2])
+    u8 = Dropout(dropout)(u8)
+    c8 = conv2d_block(u8, n_filters=n_filters*2, kernel_size=3, batchnorm=batchnorm)
+
+    u9 = Conv2DTranspose(n_filters*1, (3, 3), strides=(2, 2), padding='same') (c8)
+    u9 = concatenate([u9, c1], axis=3)
+    u9 = Dropout(dropout)(u9)
+    c9 = conv2d_block(u9, n_filters=n_filters*1, kernel_size=3, batchnorm=batchnorm)
+
+    outputs = Conv2D(nClasses, (1, 1), activation='sigmoid') (c9)
+    model = Model(inputs=[input_img], outputs=[outputs])
+    return model
+
+
+
+def get_unet_small1 (nClasses, input_height=128, input_width=128, n_filters = 16, dropout = 0.1, batchnorm = True, n_channels=3):
+
+    input_img = Input(shape=(input_height,input_width, n_channels))
+
+    # Contracting Path
+    c1 = conv2d_block(input_img, n_filters * 1, kernel_size = 3, batchnorm = batchnorm)
+    p1 = MaxPooling2D((2, 2))(c1)
+    p1 = Dropout(dropout)(p1)
+
+    c2 = conv2d_block(p1, n_filters * 1, kernel_size = 3, batchnorm = batchnorm)
+    p2 = MaxPooling2D((2, 2))(c2)
+    p2 = Dropout(dropout)(p2)
+
+    c3 = conv2d_block(p2, n_filters = n_filters * 2, kernel_size = 3, batchnorm = batchnorm)
+
+    # Expansive Path
+    u8 = Conv2DTranspose(n_filters * 2, (3, 3), strides = (2, 2), padding = 'same')(c3)
+    u8 = concatenate([u8, c2])
+    u8 = Dropout(dropout)(u8)
+    c8 = conv2d_block(u8, n_filters * 1, kernel_size = 3, batchnorm = batchnorm)
+
+    u9 = Conv2DTranspose(n_filters * 1, (3, 3), strides = (2, 2), padding = 'same')(c8)
+    u9 = concatenate([u9, c1])
+    u9 = Dropout(dropout)(u9)
+    c9 = conv2d_block(u9, n_filters * 1, kernel_size = 3, batchnorm = batchnorm)
+
+    outputs = Conv2D(nClasses, (1, 1), activation='relu')(c9)
+    model = Model(inputs=[input_img], outputs=[outputs])
+    return model
+
 def get_unet_small2 (nClasses, input_height=128, input_width=128, n_filters = 16, dropout = 0.1, batchnorm = True, n_channels=3):
 
     input_img = Input(shape=(input_height,input_width, n_channels))
@@ -725,6 +806,9 @@ def get_unet_small2 (nClasses, input_height=128, input_width=128, n_filters = 16
     outputs = Conv2D(nClasses, (1, 1), activation='relu')(c3)
     model = Model(inputs=[input_img], outputs=[outputs])
     return model
+
+
+
 ################################### metrics ########################################
 # dice score metric
 # def dice_coef(y_true, y_pred, smooth=1e-6):
@@ -876,7 +960,7 @@ validation_generator = generator_from_lists(images_validation, masks_validation,
 # model 불러오기
 # model = get_model(MODEL_NAME, input_height=IMAGE_SIZE[0], input_width=IMAGE_SIZE[1], n_filters=N_FILTERS, n_channels=N_CHANNELS)
 # model = sm.Unet('vgg16', classes=1, input_shape = (IMAGE_SIZE[0], IMAGE_SIZE[1], N_CHANNELS), activation='sigmoid', decoder_block_type='upsampling')
-model = get_unet_small2(nClasses=1,  input_height=IMAGE_SIZE[0], input_width=IMAGE_SIZE[1], n_filters=N_FILTERS, n_channels=N_CHANNELS)
+model = get_unet_small1(nClasses=1,  input_height=IMAGE_SIZE[0], input_width=IMAGE_SIZE[1], n_filters=N_FILTERS, n_channels=N_CHANNELS)
 # model.compile(optimizer=Adam(lr=1e-5), loss=[dice_coef_loss], metrics=['accuracy', dice_coef, miou])
 model.compile(optimizer=Adam(lr=1e-3), loss= sm.losses.binary_focal_loss, metrics=['accuracy', dice_coef, miou])
 # model.compile(optimizer = Adam(learning_rate=5e-5), loss = sm.losses.binary_focal_loss, metrics = ['accuracy', miou])
