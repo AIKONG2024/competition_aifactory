@@ -217,10 +217,72 @@ def shuffle_lists(images_path, masks_path, random_state=None):
     shuffled_images_path, shuffled_masks_path = zip(*combined)
     return list(shuffled_images_path), list(shuffled_masks_path)
 
+def rotate_image(image, angle):
+    """이미지를 주어진 각도로 회전합니다."""
+    height, width = image.shape[:2]
+    rotation_matrix = cv2.getRotationMatrix2D((width/2, height/2), angle, 1)
+    rotated_image = cv2.warpAffine(image, rotation_matrix, (width, height))
+    return rotated_image
+
+def random_crop(image, mask, crop_size):
+    """이미지와 마스크를 무작위로 자릅니다."""
+    height, width = image.shape[:2]
+    x = random.randint(0, max(0, width - crop_size))
+    y = random.randint(0, max(0, height - crop_size))
+    cropped_image = image[y:y+crop_size, x:x+crop_size]
+    cropped_mask = mask[y:y+crop_size, x:x+crop_size]
+    return cropped_image, cropped_mask
+
+def adjust_brightness(image, factor=1.2):
+    """이미지의 광도를 조절합니다."""
+    hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)  # HSV로 변환
+    hsv = np.array(hsv, dtype=np.float64)
+    hsv[:, :, 2] = hsv[:, :, 2] * factor  # V 채널(밝기) 조절
+    hsv[:, :, 2][hsv[:, :, 2] > 255] = 255  # 최대값을 넘지 않도록 조절
+    hsv = np.array(hsv, dtype=np.uint8)
+    image = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)  # RGB로 되돌림
+    return image
+
+def add_noise(image):
+    """이미지에 무작위 노이즈를 추가합니다."""
+    mean = 0
+    var = 10
+    sigma = var ** 0.5
+    gauss = np.random.normal(mean, sigma, image.shape)
+    noisy_image = np.clip(image + gauss, 0, 255).astype(np.uint8)
+    return noisy_image
+
 def augment_image(image, mask):
+    """이미지와 마스크에 여러 증강 기법을 적용합니다."""
+    # 50% 확률로 좌우 반전
     if random.random() > 0.5:
         image = np.fliplr(image)
         mask = np.fliplr(mask)
+    
+    # 50% 확률로 상하 반전
+    if random.random() > 0.5:
+        image = np.flipud(image)
+        mask = np.flipud(mask)
+    
+    # 50% 확률로 이미지 회전
+    if random.random() > 0.5:
+        angle = random.choice([90, 180, 270])  # 90도 단위로 회전
+        image = rotate_image(image, angle)
+        mask = rotate_image(mask, angle)
+    
+    # 50% 확률로 광도 조절
+    if random.random() > 0.5:
+        factor = random.uniform(0.9, 1.1)  # 광도 조절 요소
+        image = adjust_brightness(image, factor=factor)
+    
+    # 50% 확률로 노이즈 추가
+    # if random.random() > 0.5:
+    #     image = add_noise(image)
+    
+    # 무작위로 자르기 적용
+    crop_size = random.randint(int(image.shape[0] * 0.85), image.shape[0])  # 최소 80% 크기로 자름
+    image, mask = random_crop(image, mask, crop_size)
+    
     return image, mask
 
 @threadsafe_generator
@@ -229,8 +291,8 @@ def generator_from_lists(images_path, masks_path, batch_size=32, shuffle=True, r
     augmented_images_path = []
     augmented_masks_path = []
 
-    # 증강할 이미지의 인덱스 결정
-    augment_indices = np.random.choice(len(images_path), size=len(images_path) // 2, replace=False)
+    # 증강할 이미지의 인덱스 결정 10%
+    augment_indices = np.random.choice(len(images_path), size=int(len(images_path) * 0.1), replace=False)
     
     # 증강된 이미지와 원본 이미지를 모두 포함하는 새로운 리스트 생성
     for idx in range(len(images_path)):
@@ -246,7 +308,6 @@ def generator_from_lists(images_path, masks_path, batch_size=32, shuffle=True, r
 
         # 증강 인덱스에 해당하는 경우, 증강된 이미지/마스크도 추가
         if idx in augment_indices:
-            print(f"데이터 증강 중... ({idx} / {len(augment_indices)})")
             img_aug, mask_aug = augment_image(img, mask)
             augmented_images_path.append(img_aug)
             augmented_masks_path.append(mask_aug)
@@ -620,6 +681,44 @@ def att_r2_unet(img_w, img_h, n_label, data_format='channels_last'):
     model = Model(inputs=inputs, outputs=conv7)
     #model.compile(optimizer=Adam(lr=1e-6), loss=[dice_coef_loss], metrics=['accuracy', dice_coef])
     return model
+
+
+###################################################################################################
+def conv2d_block(input_tensor, n_filters, kernel_size = 3, batchnorm = True):
+    # first layer
+    x = Conv2D(filters=n_filters, kernel_size=(kernel_size, kernel_size), kernel_initializer="he_normal",
+               padding="same")(input_tensor)
+    if batchnorm:
+        x = BatchNormalization()(x)
+    x = Activation("relu")(x)
+
+    # second layer
+    x = Conv2D(filters=n_filters, kernel_size=(kernel_size, kernel_size), kernel_initializer="he_normal",
+               padding="same")(x)
+    if batchnorm:
+        x = BatchNormalization()(x)
+    x = Activation("relu")(x)
+    return x
+def get_unet_small2 (nClasses, input_height=128, input_width=128, n_filters = 16, dropout = 0.1, batchnorm = True, n_channels=3):
+
+    input_img = Input(shape=(input_height,input_width, n_channels))
+
+    # Contracting Path
+    c1 = conv2d_block(input_img, n_filters * 1, kernel_size = 3, batchnorm = batchnorm)
+    p1 = MaxPooling2D((2, 2))(c1)
+    p1 = Dropout(dropout)(p1)
+
+    c2 = conv2d_block(p1, n_filters = n_filters * 4, kernel_size = 3, batchnorm = batchnorm)
+
+    # Expansive Path
+    u3 = Conv2DTranspose(n_filters * 1, (3, 3), strides = (2, 2), padding = 'same')(c2)
+    u3 = concatenate([u3, c1])
+    u3 = Dropout(dropout)(u3)
+    c3 = conv2d_block(u3, n_filters * 1, kernel_size = 3, batchnorm = batchnorm)
+
+    outputs = Conv2D(nClasses, (1, 1), activation='relu')(c3)
+    model = Model(inputs=[input_img], outputs=[outputs])
+    return model
 ################################### metrics ########################################
 # dice score metric
 # def dice_coef(y_true, y_pred, smooth=1e-6):
@@ -771,7 +870,7 @@ validation_generator = generator_from_lists(images_validation, masks_validation,
 # model 불러오기
 # model = get_model(MODEL_NAME, input_height=IMAGE_SIZE[0], input_width=IMAGE_SIZE[1], n_filters=N_FILTERS, n_channels=N_CHANNELS)
 # model = sm.Unet('vgg16', classes=1, input_shape = (IMAGE_SIZE[0], IMAGE_SIZE[1], N_CHANNELS), activation='sigmoid', decoder_block_type='upsampling')
-model = simplified_att_unet(img_w= IMAGE_SIZE[0], img_h= IMAGE_SIZE[1], n_label=1, data_format='channels_last')
+model = get_unet_small2(nClasses=1,  input_height=IMAGE_SIZE[0], input_width=IMAGE_SIZE[1], n_filters=N_FILTERS, n_channels=N_CHANNELS)
 # model.compile(optimizer=Adam(lr=1e-5), loss=[dice_coef_loss], metrics=['accuracy', dice_coef, miou])
 model.compile(optimizer=Adam(lr=1e-3), loss= sm.losses.binary_focal_loss, metrics=['accuracy', dice_coef, miou])
 # model.compile(optimizer = Adam(learning_rate=5e-5), loss = sm.losses.binary_focal_loss, metrics = ['accuracy', miou])
