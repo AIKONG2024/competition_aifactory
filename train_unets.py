@@ -223,7 +223,9 @@ def augment_image(image, mask):
         mask = np.fliplr(mask)
     return image, mask
 
+@threadsafe_generator
 def generator_from_lists(images_path, masks_path, batch_size=32, shuffle=True, random_state=None):
+    print("==데이터 증강 시작==")
     augmented_images_path = []
     augmented_masks_path = []
 
@@ -232,10 +234,11 @@ def generator_from_lists(images_path, masks_path, batch_size=32, shuffle=True, r
     
     # 증강된 이미지와 원본 이미지를 모두 포함하는 새로운 리스트 생성
     for idx in range(len(images_path)):
+        
         img_path = images_path[idx]
         mask_path = masks_path[idx]
         
-        img = get_img_arr(img_path)
+        img = get_img_arr(img_path, bands=(7,6,2))
         mask = get_mask_arr(mask_path)
 
         augmented_images_path.append(img)
@@ -243,6 +246,7 @@ def generator_from_lists(images_path, masks_path, batch_size=32, shuffle=True, r
 
         # 증강 인덱스에 해당하는 경우, 증강된 이미지/마스크도 추가
         if idx in augment_indices:
+            print(f"데이터 증강 중... ({idx} / {len(augment_indices)})")
             img_aug, mask_aug = augment_image(img, mask)
             augmented_images_path.append(img_aug)
             augmented_masks_path.append(mask_aug)
