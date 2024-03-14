@@ -254,30 +254,35 @@ def add_noise(image):
 
 def augment_image(image, mask):
     """이미지와 마스크에 여러 증강 기법을 적용합니다."""
-    # 50% 확률로 좌우 반전
-    if random.random() > 0.5:
-        image = np.fliplr(image)
-        mask = np.fliplr(mask)
+    # # 50% 확률로 좌우 반전
+    # if random.random() > 0.5:
+    #     image = np.fliplr(image)
+    #     mask = np.fliplr(mask)
     
-    # 50% 확률로 상하 반전
-    if random.random() > 0.5:
-        image = np.flipud(image)
-        mask = np.flipud(mask)
+    # # 50% 확률로 상하 반전
+    # if random.random() > 0.5:
+    #     image = np.flipud(image)
+    #     mask = np.flipud(mask)
     
     # 50% 확률로 이미지 회전
-    if random.random() > 0.5:
-        angle = random.choice([90, 180, 270])  # 90도 단위로 회전
-        image = rotate_image(image, angle)
-        mask = rotate_image(mask, angle)
+    # if random.random() > 0.5:
+    #     angle = random.choice([90, 180, 270])  # 90도 단위로 회전
+    #     image = rotate_image(image, angle)
+    #     mask = rotate_image(mask, angle)
     
-    # 50% 확률로 광도 조절
-    if random.random() > 0.5:
-        factor = random.uniform(0.9, 1.1)  # 광도 조절 요소
-        image = adjust_brightness(image, factor=factor)
+    # # 50% 확률로 광도 조절
+    # if random.random() > 0.5:
+    #     factor = random.uniform(0.9, 1.1)  # 광도 조절 요소
+    #     image = adjust_brightness(image, factor=factor)
     
     # 50% 확률로 노이즈 추가
     # if random.random() > 0.5:
     #     image = add_noise(image)
+    
+    # 이미지회전
+    angle = random.choice([90, 180, 270])  # 90도 단위로 회전
+    image = rotate_image(image, angle)
+    mask = rotate_image(mask, angle)
     
     # 무작위로 자르기 적용
     crop_size = random.randint(int(image.shape[0] * 0.85), image.shape[0])  # 최소 80% 크기로 자름
