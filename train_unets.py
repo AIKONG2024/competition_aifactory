@@ -313,7 +313,7 @@ def generator_from_lists(images_path, masks_path, batch_size=32, shuffle=True, r
 
         # 증강 인덱스에 해당하는 경우, 증강된 이미지/마스크도 추가
         if idx in augment_indices:
-            print(f"증강중...{idx}/ {images_path}")
+            print(f"증강중...{idx}/ {len(images_path)}")
             img_aug, mask_aug = augment_image(img, mask)
             augmented_images_path.append(img_aug)
             augmented_masks_path.append(mask_aug)
