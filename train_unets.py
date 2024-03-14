@@ -47,7 +47,7 @@ MAX_PIXEL_VALUE = 65535 # 이미지 정규화를 위한 픽셀 최대값
 N_FILTERS = 16 # 필터수 지정
 N_CHANNELS = 3 # channel 지정
 EPOCHS = 200 # 훈련 epoch 지정
-BATCH_SIZE = 64 # batch size 지정
+BATCH_SIZE = 80 # batch size 지정
 IMAGE_SIZE = (256, 256) # 이미지 크기 지정
 MODEL_NAME = 'unet' # 모델 이름
 INITIAL_EPOCH = 0 # 초기 epoch
@@ -64,7 +64,7 @@ MASKS_PATH = 'datasets/train_mask/'
 
 # 가중치 저장 위치
 OUTPUT_DIR = f'datasets/train_output/{save_name}/'
-WORKERS = 35
+WORKERS = 40
 
 # 조기종료
 EARLY_STOP_PATIENCE = 15
@@ -193,13 +193,13 @@ def generator_from_lists(images_path, masks_path, batch_size=32, shuffle = True,
 
         for img_path, mask_path in zip(images_path, masks_path):
 
-            img = fopen_image(img_path, bands=(7,6,8))
+            img = fopen_image(img_path, bands=(7,6,2))
             mask = fopen_mask(mask_path)
             
             # #대비조절
-            img = np.uint8(img * 255)  # 이미지를 8-bit 정수 타입으로 변환
-            img = enhance_image_contrast(img)
-            img = img.astype(np.float32) / 255. #다시 32 float 타입 변환
+            # img = np.uint8(img * 255)  # 이미지를 8-bit 정수 타입으로 변환
+            # img = enhance_image_contrast(img)
+            # img = img.astype(np.float32) / 255. #다시 32 float 타입 변환
             
             
             images.append(img)
@@ -628,7 +628,7 @@ if not os.path.exists(OUTPUT_DIR):
     os.makedirs(OUTPUT_DIR)
 
 # train : val = 8 : 2 나누기
-x_tr, x_val = train_test_split(train_meta, test_size=0.25, random_state=RANDOM_STATE)
+x_tr, x_val = train_test_split(train_meta, test_size=0.20, random_state=RANDOM_STATE)
 print(len(x_tr), len(x_val)) #26860 6715
 
 # train : val 지정 및 generator
@@ -647,21 +647,21 @@ validation_generator = generator_from_lists(images_validation, masks_validation,
 # model = get_model(MODEL_NAME, input_height=IMAGE_SIZE[0], input_width=IMAGE_SIZE[1], n_filters=N_FILTERS, n_channels=N_CHANNELS)
 # model = sm.Unet('vgg16', classes=1, input_shape = (IMAGE_SIZE[0], IMAGE_SIZE[1], N_CHANNELS), activation='sigmoid', decoder_block_type='upsampling')
 model = att_r2_unet(IMAGE_SIZE[0], IMAGE_SIZE[1], n_label=1, data_format='channels_last')
-model.compile(optimizer=Adam(lr=1e-6), loss=[dice_coef_loss], metrics=['accuracy', dice_coef, miou])
+model.compile(optimizer=Adam(lr=1e-5), loss=[dice_coef_loss], metrics=['accuracy', dice_coef, miou])
 # model.compile(optimizer = Adam(learning_rate=5e-5), loss = sm.losses.binary_focal_loss, metrics = ['accuracy', miou])
 model.summary()
 
 
 # checkpoint 및 조기종료 설정
-es = EarlyStopping(monitor='val_miou', mode='auto', verbose=1, patience=EARLY_STOP_PATIENCE, restore_best_weights=True)
+es = EarlyStopping(monitor='val_miou', mode='max', verbose=1, patience=EARLY_STOP_PATIENCE, restore_best_weights=True)
 checkpoint = ModelCheckpoint(os.path.join(OUTPUT_DIR, CHECKPOINT_MODEL_NAME), monitor='val_miou', verbose=1,
-save_best_only=True, mode='auto', period=CHECKPOINT_PERIOD)
-# rlr = ReduceLROnPlateau(monitor='val_miou',
-#                         patience=5, #early stopping 의 절반
-#                         mode = 'auto',
-#                         verbose= 1,
-#                         factor=0.5 #learning rate 를 반으로 줄임.
-#                         )
+save_best_only=True, mode='max', period=CHECKPOINT_PERIOD)
+rlr = ReduceLROnPlateau(monitor='val_miou',
+                        patience=7, #early stopping 의 절반
+                        mode = 'max',
+                        verbose= 1,
+                        factor=0.5 #learning rate 를 반으로 줄임.
+                        )
 
 print('---model 훈련 시작---')
 history = model.fit_generator(
