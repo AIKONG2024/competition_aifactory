@@ -897,3 +897,17 @@ print('가중치 저장')
 model_weights_output = os.path.join(OUTPUT_DIR, FINAL_WEIGHTS_OUTPUT)
 model.save_weights(model_weights_output)
 print("저장된 가중치 명: {}".format(model_weights_output))
+y_pred_dict = {}
+
+for idx, i in enumerate(test_meta['test_img']):
+    img = get_img_arr(f'datasets/test_img/{i}', (7,6,8)) 
+    img = np.uint8(img * 255) 
+    img = enhance_image_contrast(img)
+    img = img.astype(np.float32) / 255
+    y_pred = model.predict(np.array([img]), batch_size=32)
+    y_pred = np.where(y_pred[0, :, :, 0] > THESHOLDS, 1, 0) # 임계값 처리
+    y_pred = y_pred.astype(np.uint8)
+    y_pred_dict[i] = y_pred
+    
+joblib.dump(y_pred_dict, f'predict/{MODEL_NAME}_{save_name}_y_pred.pkl')
+print("저장된 pkl:", f'predict/{MODEL_NAME}_{save_name}_y_pred.pkl')
