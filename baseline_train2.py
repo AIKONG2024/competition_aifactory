@@ -31,6 +31,7 @@ from keras import backend as K
 from sklearn.model_selection import train_test_split
 import joblib
 import segmentation_models as sm
+import cv2
 
 """&nbsp;
 
@@ -65,16 +66,12 @@ def threadsafe_generator(f):
 
     return g
 
-def get_img_arr(path):
-    img = rasterio.open(path).read().transpose((1, 2, 0))
-    img = np.float32(img)/MAX_PIXEL_VALUE
-
-    return img
-
-def get_img_762bands(path):
-    img = rasterio.open(path).read((7,6,2)).transpose((1, 2, 0))
-    img = np.float32(img)/MAX_PIXEL_VALUE
-
+def get_img_arr(path, bands):
+    if len(bands) > 0 :
+        img = rasterio.open(path).read(bands).transpose((1, 2, 0))
+    else:
+        img = rasterio.open(path).read().transpose((1, 2, 0))
+    img = np.float32(img) / MAX_PIXEL_VALUE
     return img
 
 def get_mask_arr(path):
@@ -82,7 +79,101 @@ def get_mask_arr(path):
     seg = np.float32(img)
     return seg
 
+def get_img_762bands(path):
+    img = rasterio.open(path).read((7,6,2)).transpose((1, 2, 0))
+    img = np.float32(img)/MAX_PIXEL_VALUE
 
+    return img
+
+# Data Augmentation 설정
+def get_image_data_gen():
+    #데이터가 이미지 끝부분에 걸쳐있는 경우가 많아 세밀한 조정 필요
+    data_gen_args = dict(
+        horizontal_flip=True,
+        vertical_flip=True,
+    )
+
+    image_datagen = ImageDataGenerator(**data_gen_args)
+    mask_datagen = ImageDataGenerator(**data_gen_args)
+    return image_datagen, mask_datagen
+
+#색채 대비
+def enhance_image_contrast(image):
+    # CLAHE 객체 생성
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
+    
+    # 이미지를 LAB 색공간으로 변환
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    
+    # L 채널에 CLAHE 적용
+    l_clahe = clahe.apply(l)
+    
+    # 밝기조절 - 어둡게
+    l_clahe = np.clip(l_clahe * 0.3, 0, 255).astype(l.dtype)
+    
+    # 채널 합치기 및 색공간 변환
+    enhanced_lab = cv2.merge((l_clahe, a, b))
+    enhanced_image = cv2.cvtColor(enhanced_lab, cv2.COLOR_LAB2BGR)
+    
+    return enhanced_image
+
+def shuffle_lists(images_path, masks_path, random_state=None):
+    if random_state is not None:
+        np.random.seed(random_state)
+    combined = list(zip(images_path, masks_path))
+    np.random.shuffle(combined)
+    shuffled_images_path, shuffled_masks_path = zip(*combined)
+    return list(shuffled_images_path), list(shuffled_masks_path)
+
+def rotate_image(image, angle):
+    height, width = image.shape[:2]
+    rotation_matrix = cv2.getRotationMatrix2D((width/2, height/2), angle, 1)
+    rotated_image = cv2.warpAffine(image, rotation_matrix, (width, height))
+    if len(image.shape) == 2 or image.shape[2] == 1:
+        rotated_image = rotated_image[:, :, np.newaxis]
+    return rotated_image
+
+def adjust_brightness(image, factor=1.2):
+    hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
+    hsv = np.array(hsv, dtype=np.float64)
+    hsv[:, :, 2] = hsv[:, :, 2] * factor
+    hsv[:, :, 2][hsv[:, :, 2] > 255] = 255
+    hsv = np.array(hsv, dtype=np.uint8)
+    image = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
+    return image
+
+def add_noise(image):
+    mean = 0
+    var = 10
+    sigma = var ** 0.5
+    gauss = np.random.normal(mean, sigma, image.shape)
+    noisy_image = np.clip(image + gauss, 0, 255).astype(np.uint8)
+    return noisy_image
+
+def augment_image(image, mask, IMAGE_SIZE=(256, 256)):
+    per = 0.4
+    # 확률적으로 이미지 변환 적용
+    if random.random() < per:
+        image = np.fliplr(image)
+        mask = np.fliplr(mask)
+    
+    if random.random() < per:
+        image = np.flipud(image)
+        mask = np.flipud(mask)
+    
+    if random.random() < per:
+        angle = random.choice([90, 180, 270])
+        image = rotate_image(image, angle)
+        mask = rotate_image(mask, angle)
+    
+    if random.random() < per:
+        factor = random.uniform(0.9, 1.1)
+        image = adjust_brightness(image, factor=factor)
+    
+    if random.random() < per:
+        image = add_noise(image)
+    return image, mask
 
 @threadsafe_generator
 def generator_from_lists(images_path, masks_path, batch_size=32, shuffle = True, random_state=None, image_mode='10bands'):
@@ -207,7 +298,115 @@ def get_unet(nClasses, input_height=256, input_width=256, n_filters = 16, dropou
     model = Model(inputs=[input_img], outputs=[outputs])
     return model
 
+from keras.applications import ResNet50
+def get_pretrained_unet(nClasses, input_height=256, input_width=256, n_filters=16, dropout=0.1, batchnorm=True, n_channels=10):
+    base_model = ResNet50(weights='imagenet', include_top=False, input_tensor=Input(shape=(input_height, input_width, 3)))
 
+    # 사전 학습된 모델의 중간 계층을 추출 (예시: ResNet50의 경우)
+    # 실제 계층 이름은 모델마다 다를 수 있으므로 확인이 필요합니다.
+    c1 = base_model.get_layer('conv1_relu').output  # 예시 이름, 실제 사용할 계층에 맞게 수정 필요
+    c2 = base_model.get_layer('conv2_block3_out').output
+    c3 = base_model.get_layer('conv3_block4_out').output
+    c4 = base_model.get_layer('conv4_block6_out').output
+    c5 = base_model.output  # 인코더의 마지막 계층
+
+    # 확장 경로 시작
+    u6 = Conv2DTranspose(n_filters*8, (3, 3), strides=(2, 2), padding='same') (c5)
+    u6 = concatenate([u6, c4])
+    u6 = Dropout(dropout)(u6)
+    c6 = conv2d_block(u6, n_filters=n_filters*8, kernel_size=3, batchnorm=batchnorm)
+
+    u7 = Conv2DTranspose(n_filters*4, (3, 3), strides=(2, 2), padding='same') (c6)
+    u7 = concatenate([u7, c3])
+    u7 = Dropout(dropout)(u7)
+    c7 = conv2d_block(u7, n_filters=n_filters*4, kernel_size=3, batchnorm=batchnorm)
+    
+    u8 = Conv2DTranspose(n_filters*2, (3, 3), strides=(2, 2), padding='same') (c7)
+    u8 = concatenate([u8, c2])
+    u8 = Dropout(dropout)(u8)
+    c8 = conv2d_block(u8, n_filters=n_filters*2, kernel_size=3, batchnorm=batchnorm)
+
+    u9 = Conv2DTranspose(n_filters*1, (3, 3), strides=(2, 2), padding='same') (c8)
+    u9 = concatenate([u9, c1], axis=3)
+    u9 = Dropout(dropout)(u9)
+    c9 = conv2d_block(u9, n_filters=n_filters*1, kernel_size=3, batchnorm=batchnorm)
+
+    outputs = Conv2D(nClasses, (1, 1), activation='sigmoid') (c9)
+    model = Model(inputs=base_model.input, outputs=[outputs])
+
+    return model
+    
+#Attention Gate
+def attention_gate(F_g, F_l, inter_channel):
+    """Attention Gate with correct up-sampling for dimension matching."""
+    W_g = Conv2D(inter_channel, kernel_size=1, padding='same', kernel_initializer='he_normal')(F_g)
+    W_x = Conv2D(inter_channel, kernel_size=2, strides=2, padding='same', kernel_initializer='he_normal')(F_l)
+    
+    # 여기서 W_x의 차원을 W_g와 맞추기 위해 UpSampling2D를 적절히 사용합니다.
+    # W_g의 차원과 W_x의 원래 차원을 기반으로 적절한 업샘플링 비율을 결정합니다.
+    # 예시에서는 (32, 32, 64)으로 만들어야 하므로, W_x를 2배 업샘플링합니다.
+    W_x_upsampled = UpSampling2D(size=(2, 2))(W_x)  # 이제 W_x_upsampled의 차원이 (32, 32, 64)가 됩니다.
+
+    psi = Activation('relu')(Add()([W_g, W_x_upsampled]))
+    psi = Conv2D(1, kernel_size=1, padding='same', kernel_initializer='he_normal')(psi)
+    psi = Activation('sigmoid')(psi)
+
+    attended = Multiply()([F_l, psi])
+    return attended
+
+def conv2d_block(input_tensor, n_filters, kernel_size=3, batchnorm=True):
+    """Function to add 2 convolutional layers with the parameters passed to it."""
+    x = Conv2D(filters=n_filters, kernel_size=(kernel_size, kernel_size), padding='same', kernel_initializer='he_normal')(input_tensor)
+    if batchnorm:
+        x = BatchNormalization()(x)
+    x = Activation('relu')(x)
+
+    x = Conv2D(filters=n_filters, kernel_size=(kernel_size, kernel_size), padding='same', kernel_initializer='he_normal')(x)
+    if batchnorm:
+        x = BatchNormalization()(x)
+    x = Activation('relu')(x)
+    return x
+
+def get_pretrained_attention_unet(nClasses, input_height=256, input_width=256, n_filters=16, dropout=0.1, batchnorm=True, n_channels=3):
+    inputs = Input(shape=(input_height, input_width, n_channels))
+    base_model = ResNet50(include_top=False, weights='imagenet', input_tensor=inputs)
+
+    # Encoder - getting the output of intermediate layers
+    c1 = base_model.get_layer('conv1_relu').output
+    c2 = base_model.get_layer('conv2_block3_out').output
+    c3 = base_model.get_layer('conv3_block4_out').output
+    c4 = base_model.get_layer('conv4_block6_out').output
+    c5 = base_model.output
+
+    # Decoder
+    u6 = Conv2DTranspose(n_filters * 8, (3, 3), strides=(2, 2), padding='same')(c5)
+    u6 = Dropout(dropout)(u6)
+    a6 = attention_gate(F_g=u6, F_l=c4, inter_channel=n_filters * 4)  # inter_channel 값을 수정
+    u6 = concatenate([u6, a6])
+    c6 = conv2d_block(u6, n_filters * 8, batchnorm=batchnorm)
+
+    u7 = Conv2DTranspose(n_filters * 4, (3, 3), strides=(2, 2), padding='same')(c6)
+    u7 = Dropout(dropout)(u7)
+    a7 = attention_gate(F_g=u7, F_l=c3, inter_channel=n_filters * 2)  # 여기에서 F_g를 u7로 수정
+    u7 = concatenate([u7, a7])
+    c7 = conv2d_block(u7, n_filters * 4, batchnorm=batchnorm)  # n_filters * 4로 수정
+
+    u8 = Conv2DTranspose(n_filters * 2, (3, 3), strides=(2, 2), padding='same')(c7)
+    u8 = Dropout(dropout)(u8)
+    a8 = attention_gate(F_g=u8, F_l=c2, inter_channel=n_filters)  # 여기에서 F_g를 u8로 수정
+    u8 = concatenate([u8, a8])
+    c8 = conv2d_block(u8, n_filters * 2, batchnorm=batchnorm)  # n_filters * 2로 수정
+
+    u9 = Conv2DTranspose(n_filters, (3, 3), strides=(2, 2), padding='same')(c8)
+    u9 = Dropout(dropout)(u9)
+    a9 = attention_gate(F_g=u9, F_l=c1, inter_channel=n_filters // 2)  # 여기에서 F_g를 u9로 수정
+    u9 = concatenate([u9, a9], axis=3)
+    c9 = conv2d_block(u9, n_filters, batchnorm=batchnorm)  # n_filters로 수정
+
+    outputs = Conv2D(nClasses, (1, 1), activation='sigmoid')(c9)  # 이전에 c6가 아니라 c9를 사용해야 합니다.
+
+    model = Model(inputs=[inputs], outputs=[outputs])
+    return model
 
 def get_unet_small1 (nClasses, input_height=128, input_width=128, n_filters = 16, dropout = 0.1, batchnorm = True, n_channels=3):
 
@@ -313,6 +512,10 @@ def get_model(model_name, nClasses=1, input_height=128, input_width=128, n_filte
         model = get_unet_small2
     elif model_name == 'eb0':
         model = get_efficientunet_b0
+    elif model_name == 'pre_unet':
+        model = get_pretrained_unet
+    elif model_name == 'pre_attention_unet':
+        model = get_pretrained_attention_unet
     return model(
             nClasses      = nClasses,
             input_height  = input_height,
@@ -360,7 +563,7 @@ def miou(y_true, y_pred, smooth=1e-6):
     return miou
 
 
-def ohem_loss(y_true, y_pred, n_hard_examples=5):
+def ohem_loss(y_true, y_pred, n_hard_examples=20):
     """
     Online Hard Example Mining (OHEM) 손실 함수.
     
@@ -386,14 +589,14 @@ test_meta = pd.read_csv('datasets/test_meta.csv')
 
 
 # 저장 이름
-save_name = 'base_line'
+save_name = 'pre_unet'
 
 N_FILTERS = 16 # 필터수 지정
 N_CHANNELS = 3 # channel 지정
 EPOCHS = 300 # 훈련 epoch 지정
 BATCH_SIZE = 32 # batch size 지정
 IMAGE_SIZE = (256, 256) # 이미지 크기 지정
-MODEL_NAME = 'unet' # 모델 이름
+MODEL_NAME = 'pre_attention_unet' # 모델 이름
 INITIAL_EPOCH = 0 # 초기 epoch
 
 # 데이터 위치
@@ -402,7 +605,7 @@ MASKS_PATH = 'datasets/train_mask/'
 
 # 가중치 저장 위치
 OUTPUT_DIR = 'datasets/train_output/'
-WORKERS = 24
+WORKERS = 40
 
 # 조기종료
 EARLY_STOP_PATIENCE = 15
@@ -455,8 +658,8 @@ validation_generator = generator_from_lists(images_validation, masks_validation,
 
 
 # model 불러오기
-model = get_model(MODEL_NAME, input_height=IMAGE_SIZE[0], input_width=IMAGE_SIZE[1], n_filters=N_FILTERS, n_channels=N_CHANNELS)
-model.compile(optimizer = Adam(learning_rate=0.001), loss = sm.losses.binary_focal_loss, metrics = ['accuracy', miou])
+model = get_model(MODEL_NAME,nClasses=1, input_height=IMAGE_SIZE[0], input_width=IMAGE_SIZE[1], n_filters=N_FILTERS, n_channels=N_CHANNELS)
+model.compile(optimizer = Adam(learning_rate=0.001), loss = ohem_loss, metrics = ['accuracy', miou])
 model.summary()
 
 
@@ -509,4 +712,4 @@ for i in test_meta['test_img']:
     y_pred = y_pred.astype(np.uint8)
     y_pred_dict[i] = y_pred
 
-joblib.dump(y_pred_dict, 'predict/y_pred22222.pkl')
+# joblib.dump(y_pred_dict, 'predict/y_pred.pkl')
