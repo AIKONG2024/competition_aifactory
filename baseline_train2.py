@@ -38,7 +38,7 @@ import cv2
 ## 사용할 함수 정의
 """
 #랜럼시드 고정
-RANDOM_STATE = 42 # seed 고정
+RANDOM_STATE = 4321 # seed 고정
 random.seed(RANDOM_STATE)
 np.random.seed(RANDOM_STATE)
 
@@ -152,7 +152,7 @@ def add_noise(image):
     return noisy_image
 
 def augment_image(image, mask, IMAGE_SIZE=(256, 256)):
-    per = 0.4
+    per = 0.3
     # 확률적으로 이미지 변환 적용
     if random.random() < per:
         image = np.fliplr(image)

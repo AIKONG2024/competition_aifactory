@@ -44,12 +44,12 @@ np.random.seed(RANDOM_STATE)
 
 MAX_PIXEL_VALUE = 65535 # 이미지 정규화를 위한 픽셀 최대값
 
-N_FILTERS = 32 # 필터수 지정
+N_FILTERS = 20 # 필터수 지정
 N_CHANNELS = 3 # channel 지정
 EPOCHS = 300 # 훈련 epoch 지정
-BATCH_SIZE = 2 # batch size 지정
+BATCH_SIZE = 1 # batch size 지정
 IMAGE_SIZE = (256, 256) # 이미지 크기 지정
-MODEL_NAME = 'unet' # 모델 이름
+MODEL_NAME = 'pretrained_attention_unet' # 모델 이름
 INITIAL_EPOCH = 0 # 초기 epoch
 THESHOLDS = 0.25
 
@@ -310,23 +310,30 @@ def conv2d_block(input_tensor, n_filters, kernel_size = 3, batchnorm = True):
 
 #Attention Gate
 def attention_gate(F_g, F_l, inter_channel):
-    # F_g: Gating signal from decoder path
-    # F_l: Feature map from encoder path
-    # inter_channel: Number of intermediate channels
-    
-    # Getting the gating signal to the same dimension as the layer from the encoder path
-    F_g_conv = Conv2D(filters=inter_channel, kernel_size=1, strides=1, padding='same')(F_g)
-    F_l_conv = Conv2D(filters=inter_channel, kernel_size=1, strides=1, padding='same')(F_l)
-    
-    # Adding the upsampled gating signal and the feature map
-    F_add = add([F_g_conv, F_l_conv])
-    F_relu = Activation("relu")(F_add)
-    F_attention = Conv2D(filters=1, kernel_size=1, strides=1, padding='same')(F_relu)
-    F_attention = Activation("sigmoid")(F_attention)
-    
-    # Multiplying the attention coefficients with the input feature map
-    F_mul = multiply([F_attention, F_l])
-    return F_mul
+    """
+    An attention gate.
+
+    Arguments:
+    - F_g: Gating signal typically from a coarser scale.
+    - F_l: The feature map from the skip connection.
+    - inter_channel: The number of channels/filters in the intermediate layer.
+    """
+    # Intermediate transformation on the gating signal
+    W_g = Conv2D(inter_channel, kernel_size=1, strides=1, padding='same', kernel_initializer='he_normal')(F_g)
+    W_g = BatchNormalization()(W_g)
+
+    # Intermediate transformation on the skip connection feature map
+    W_x = Conv2D(inter_channel, kernel_size=1, strides=1, padding='same', kernel_initializer='he_normal')(F_l)
+    W_x = BatchNormalization()(W_x)
+
+    # Combine the transformations
+    psi = Activation('relu')(add([W_g, W_x]))
+    psi = Conv2D(1, kernel_size=1, strides=1, padding='same', kernel_initializer='he_normal')(psi)
+    psi = BatchNormalization()(psi)
+    psi = Activation('sigmoid')(psi)
+
+    # Apply the attention coefficients to the feature map from the skip connection
+    return multiply([F_l, psi])
 
 def FCN(nClasses, input_height=128, input_width=128, n_filters = 16, dropout = 0.1, batchnorm = True, n_channels=10 ):
 
@@ -403,7 +410,7 @@ def get_unet_small2 (nClasses, input_height=128, input_width=128, n_filters = 16
     return model
 
 #UNET
-def get_unet(nClasses, input_height=256, input_width=256, n_filters = 16, dropout = 0.1, batchnorm = True, n_channels=10):
+def get_att_unet(nClasses, input_height=256, input_width=256, n_filters = 16, dropout = 0.1, batchnorm = True, n_channels=10):
     input_img = Input(shape=(input_height,input_width, n_channels))
 
     # contracting path
@@ -454,6 +461,52 @@ def get_unet(nClasses, input_height=256, input_width=256, n_filters = 16, dropou
     model = Model(inputs=[input_img], outputs=[outputs])
     return model
 
+from keras.applications import VGG16
+def get_pretrained_unet(nClasses =1 , input_height=256, input_width=256,  n_filters=16, dropout=0.5, batchnorm=True, n_channels=3):
+    # Load the VGG16 model, excluding the top classification layer
+    base_model = VGG16(weights='imagenet', include_top=False, input_shape=(input_height, input_width, n_channels))
+
+    # Define the inputs
+    inputs = base_model.input
+
+    # Use specific layers from the VGG16 model for skip connections
+    s1 = base_model.get_layer("block1_conv2").output
+    s2 = base_model.get_layer("block2_conv2").output
+    s3 = base_model.get_layer("block3_conv3").output
+    s4 = base_model.get_layer("block4_conv3").output
+
+    # The last output of the encoder part
+    b5 = base_model.get_layer("block5_conv3").output
+
+    # Start of the decoder part
+    d6 = Conv2DTranspose(n_filters * 8, (3, 3), strides=(2, 2), padding='same')(b5)
+    d6 = concatenate([d6, s4])
+    d6 = Dropout(dropout)(d6)
+    d6 = conv2d_block(d6, n_filters=n_filters * 8, kernel_size=3, batchnorm=batchnorm)
+
+    d7 = Conv2DTranspose(n_filters * 4, (3, 3), strides=(2, 2), padding='same')(d6)
+    d7 = concatenate([d7, s3])
+    d7 = Dropout(dropout)(d7)
+    d7 = conv2d_block(d7, n_filters=n_filters * 4, kernel_size=3, batchnorm=batchnorm)
+
+    d8 = Conv2DTranspose(n_filters * 2, (3, 3), strides=(2, 2), padding='same')(d7)
+    d8 = concatenate([d8, s2])
+    d8 = Dropout(dropout)(d8)
+    d8 = conv2d_block(d8, n_filters=n_filters * 2, kernel_size=3, batchnorm=batchnorm)
+
+    d9 = Conv2DTranspose(n_filters * 1, (3, 3), strides=(2, 2), padding='same')(d8)
+    d9 = concatenate([d9, s1])
+    d9 = Dropout(dropout)(d9)
+    d9 = conv2d_block(d9, n_filters=n_filters * 1, kernel_size=3, batchnorm=batchnorm)
+
+    # Output layer
+    outputs = Conv2D(nClasses, (1, 1), activation='sigmoid')(d9)
+
+    # Define the model
+    model = Model(inputs=[inputs], outputs=[outputs])
+
+    return model
+
 #UNET With Attention
 def get__attention_unet(nClasses, input_height=256, input_width=256, n_filters = 16, dropout = 0.1, batchnorm = True, n_channels=10):
     input_img = Input(shape=(input_height,input_width, n_channels))
@@ -502,6 +555,41 @@ def get__attention_unet(nClasses, input_height=256, input_width=256, n_filters =
 
     outputs = Conv2D(nClasses, (1, 1), activation='sigmoid') (c9)
     model = Model(inputs=[input_img], outputs=[outputs])
+    return model
+
+def get_pretrained_attention_unet(input_height=256, input_width=256, nClasses=1, n_filters=16, dropout=0.5, batchnorm=True, n_channels=3):
+    # Load the VGG16 model, excluding the top classification layer
+    base_model = VGG16(weights='imagenet', include_top=False, input_shape=(input_height, input_width, n_channels))
+    
+    # Define the inputs
+    inputs = base_model.input
+    
+    # Use specific layers from the VGG16 model for skip connections
+    s1 = base_model.get_layer("block1_conv2").output
+    s2 = base_model.get_layer("block2_conv2").output
+    s3 = base_model.get_layer("block3_conv3").output
+    s4 = base_model.get_layer("block4_conv3").output
+    bridge = base_model.get_layer("block5_conv3").output
+    
+    # Decoder with attention gates
+    d1 = UpSampling2D((2, 2))(bridge)
+    d1 = concatenate([d1, attention_gate(d1, s4, n_filters*8)])
+    d1 = conv2d_block(d1, n_filters*8, kernel_size=3, batchnorm=batchnorm)
+    
+    d2 = UpSampling2D((2, 2))(d1)
+    d2 = concatenate([d2, attention_gate(d2, s3, n_filters*4)])
+    d2 = conv2d_block(d2, n_filters*4, kernel_size=3, batchnorm=batchnorm)
+    
+    d3 = UpSampling2D((2, 2))(d2)
+    d3 = concatenate([d3, attention_gate(d3, s2, n_filters*2)])
+    d3 = conv2d_block(d3, n_filters*2, kernel_size=3, batchnorm=batchnorm)
+    
+    d4 = UpSampling2D((2, 2))(d3)
+    d4 = concatenate([d4, attention_gate(d4, s1, n_filters)])
+    d4 = conv2d_block(d4, n_filters, kernel_size=3, batchnorm=batchnorm)
+    
+    outputs = Conv2D(nClasses, (1, 1), activation='sigmoid')(d4)
+    model = Model(inputs=[inputs], outputs=[outputs])
     return model
 
 #EFFI_B0
@@ -636,7 +724,7 @@ def get_model(model_name, nClasses=1, input_height=128, input_width=128, n_filte
     elif model_name == 'eb7':
         model = get_efficientunet_b7
     elif model_name == 'unet':
-        model =  get_unet
+        model =  get_att_unet
     elif model_name == 'deeplabv3+':
         model = get_deeplabv3plus
     elif model_name == 'attention_unet':
@@ -647,6 +735,10 @@ def get_model(model_name, nClasses=1, input_height=128, input_width=128, n_filte
         model = get_unet_small1
     elif model_name == 'unet_s2':
         model = get_unet_small2
+    elif model_name == 'pretrained_unet':
+        model = get_pretrained_unet
+    elif model_name == 'pretrained_attention_unet':
+        model = get_pretrained_attention_unet
         
         
     return model(
@@ -748,7 +840,7 @@ class mAP(tf.keras.metrics.AUC):
     def __init__(self, name='mAP', **kwargs):
         super(mAP, self).__init__(name=name, curve='PR', **kwargs)
         
-def ohem_loss(y_true, y_pred, n_hard_examples=35):
+def ohem_loss(y_true, y_pred, n_hard_examples=20):
     """
     Online Hard Example Mining (OHEM) 손실 함수.
     
