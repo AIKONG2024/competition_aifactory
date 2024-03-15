@@ -38,7 +38,7 @@ import cv2
 ## 사용할 함수 정의
 """
 #랜럼시드 고정
-RANDOM_STATE = 42 # seed 고정
+RANDOM_STATE = 4321 # seed 고정
 random.seed(RANDOM_STATE)
 np.random.seed(RANDOM_STATE)
 
@@ -152,7 +152,7 @@ def add_noise(image):
     return noisy_image
 
 def augment_image(image, mask, IMAGE_SIZE=(256, 256)):
-    per = 0.4
+    per = 0.3
     # 확률적으로 이미지 변환 적용
     if random.random() < per:
         image = np.fliplr(image)
@@ -664,10 +664,10 @@ model.summary()
 
 
 # checkpoint 및 조기종료 설정
-es = EarlyStopping(monitor='val_iou_score', mode='max', verbose=1, patience=EARLY_STOP_PATIENCE,  restore_best_weights=True)
-checkpoint = ModelCheckpoint(os.path.join(OUTPUT_DIR, CHECKPOINT_MODEL_NAME), monitor='val_iou_score', verbose=1,
+es = EarlyStopping(monitor='val_miou', mode='max', verbose=1, patience=EARLY_STOP_PATIENCE,  restore_best_weights=True)
+checkpoint = ModelCheckpoint(os.path.join(OUTPUT_DIR, CHECKPOINT_MODEL_NAME), monitor='val_miou', verbose=1,
 save_best_only=True, mode='max', period=CHECKPOINT_PERIOD)
-rlr = ReduceLROnPlateau(monitor='val_iou_score',
+rlr = ReduceLROnPlateau(monitor='val_miou',
                         patience=7, #early stopping 의 절반
                         mode = 'max',
                         verbose= 1,
@@ -684,7 +684,7 @@ history = model.fit_generator(
     steps_per_epoch=len(images_train) // BATCH_SIZE,
     validation_data=validation_generator,
     validation_steps=len(images_validation) // BATCH_SIZE,
-    callbacks=[checkpoint, es],
+    callbacks=[checkpoint, es, rlr],
     epochs=EPOCHS,
     workers=WORKERS,
     initial_epoch=INITIAL_EPOCH
@@ -701,14 +701,15 @@ model_weights_output = os.path.join(OUTPUT_DIR, FINAL_WEIGHTS_OUTPUT)
 model.save_weights(model_weights_output)
 print("저장된 가중치 명: {}".format(model_weights_output))
 
-# y_pred_dict = {}
 
-# for i in test_meta['test_img']:
-#     img = get_img_762bands(f'datasets/test_img/{i}')
-#     y_pred = model.predict(np.array([img]), batch_size=1)
+y_pred_dict = {}
 
-#     y_pred = np.where(y_pred[0, :, :, 0] > 0.5, 1, 0) # 임계값 처리
-#     y_pred = y_pred.astype(np.uint8)
-#     y_pred_dict[i] = y_pred
+for i in test_meta['test_img']:
+    img = get_img_762bands(f'datasets/test_img/{i}')
+    y_pred = model.predict(np.array([img]), batch_size=1)
 
-# joblib.dump(y_pred_dict, 'predict/y_pred22222.pkl')
+    y_pred = np.where(y_pred[0, :, :, 0] > 0.5, 1, 0) # 임계값 처리
+    y_pred = y_pred.astype(np.uint8)
+    y_pred_dict[i] = y_pred
+
+# joblib.dump(y_pred_dict, 'predict/y_pred.pkl')

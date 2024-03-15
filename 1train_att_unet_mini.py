@@ -181,7 +181,7 @@ def unet(img_w, img_h, n_label, data_format='channels_first'):
 ########################################################################################################
 #Attention U-Net
 def att_unet(img_w, img_h, n_label, data_format='channels_first'):
-    inputs = Input((3, img_w, img_h))
+    inputs = Input((img_w, img_h, 3))
     x = inputs
     depth = 4
     features = 64
@@ -191,7 +191,7 @@ def att_unet(img_w, img_h, n_label, data_format='channels_first'):
         x = Dropout(0.2)(x)
         x = Conv2D(features, (3, 3), activation='relu', padding='same', data_format=data_format)(x)
         skips.append(x)
-        x = MaxPooling2D((2, 2), data_format='channels_first')(x)
+        x = MaxPooling2D((2, 2), data_format='channels_last')(x)
         features = features * 2
 
     x = Conv2D(features, (3, 3), activation='relu', padding='same', data_format=data_format)(x)
@@ -269,6 +269,77 @@ def att_r2_unet(img_w, img_h, n_label, data_format='channels_last'):
     model = Model(inputs=inputs, outputs=conv7)
     #model.compile(optimizer=Adam(lr=1e-6), loss=[dice_coef_loss], metrics=['accuracy', dice_coef])
     return model
+# ======================
+#UNET
+#Default Conv2D
+def conv2d_block(input_tensor, n_filters, kernel_size = 3, batchnorm = True):
+    # first layer
+    x = Conv2D(filters=n_filters, kernel_size=(kernel_size, kernel_size), kernel_initializer="he_normal",
+               padding="same")(input_tensor)
+    if batchnorm:
+        x = BatchNormalization()(x)
+    x = Activation("relu")(x)
+
+    # second layer
+    x = Conv2D(filters=n_filters, kernel_size=(kernel_size, kernel_size), kernel_initializer="he_normal",
+               padding="same")(x)
+    if batchnorm:
+        x = BatchNormalization()(x)
+    x = Activation("relu")(x)
+    return x
+
+from keras.applications.vgg16 import VGG16
+def get_unet_att(nClasses, input_height=256, input_width=256, n_filters = 16, dropout = 0.1, batchnorm = True, n_channels=10):
+    # Load VGG16 pretrained model
+    vgg16 = VGG16(weights='imagenet', include_top=False, input_shape=(input_height, input_width, 3))
+
+    # Define encoder part of U-Net with VGG16
+    input_img = vgg16.input
+
+    # contracting path
+    c1 = conv2d_block(input_img, n_filters=n_filters*1, kernel_size=3, batchnorm=batchnorm)
+    p1 = MaxPooling2D((2, 2)) (c1)
+    p1 = Dropout(dropout)(p1)
+
+    c2 = conv2d_block(p1, n_filters=n_filters*2, kernel_size=3, batchnorm=batchnorm)
+    p2 = MaxPooling2D((2, 2)) (c2)
+    p2 = Dropout(dropout)(p2)
+
+    c3 = conv2d_block(p2, n_filters=n_filters*4, kernel_size=3, batchnorm=batchnorm)
+    p3 = MaxPooling2D((2, 2)) (c3)
+    p3 = Dropout(dropout)(p3)
+
+    c4 = conv2d_block(p3, n_filters=n_filters*8, kernel_size=3, batchnorm=batchnorm)
+    p4 = MaxPooling2D(pool_size=(2, 2)) (c4)
+    p4 = Dropout(dropout)(p4)
+
+    c5 = conv2d_block(p4, n_filters=n_filters*16, kernel_size=3, batchnorm=batchnorm)
+
+    # expansive path
+    u6 = Conv2DTranspose(n_filters*8, (3, 3), strides=(2, 2), padding='same') (c5)
+    u6 = concatenate([u6, c4])
+    u6 = Dropout(dropout)(u6)
+    c6 = conv2d_block(u6, n_filters=n_filters*8, kernel_size=3, batchnorm=batchnorm)
+
+    u7 = Conv2DTranspose(n_filters*4, (3, 3), strides=(2, 2), padding='same') (c6)
+    u7 = concatenate([u7, c3])
+    u7 = Dropout(dropout)(u7)
+    c7 = conv2d_block(u7, n_filters=n_filters*4, kernel_size=3, batchnorm=batchnorm)
+
+    u8 = Conv2DTranspose(n_filters*2, (3, 3), strides=(2, 2), padding='same') (c7)
+    u8 = concatenate([u8, c2])
+    u8 = Dropout(dropout)(u8)
+    c8 = conv2d_block(u8, n_filters=n_filters*2, kernel_size=3, batchnorm=batchnorm)
+
+    u9 = Conv2DTranspose(n_filters*1, (3, 3), strides=(2, 2), padding='same') (c8)
+    u9 = concatenate([u9, c1], axis=3)
+    u9 = Dropout(dropout)(u9)
+    c9 = conv2d_block(u9, n_filters=n_filters*1, kernel_size=3, batchnorm=batchnorm)
+
+    outputs = Conv2D(nClasses, (1, 1), activation='sigmoid') (c9)
+    model = Model(inputs=[input_img], outputs=[outputs])
+    return model
+# ============
 
 from keras.models import *
 from keras.layers import *
@@ -322,12 +393,12 @@ MAX_PIXEL_VALUE = 65535 # 이미지 정규화를 위한 픽셀 최대값
 
 N_FILTERS = 32 # 필터수 지정
 N_CHANNELS = 3 # channel 지정
-EPOCHS = 50 # 훈련 epoch 지정
+EPOCHS = 100 # 훈련 epoch 지정
 BATCH_SIZE = 2 # batch size 지정
 IMAGE_SIZE = (256, 256) # 이미지 크기 지정
 MODEL_NAME = 'unet' # 모델 이름
 INITIAL_EPOCH = 0 # 초기 epoch
-THESHOLDS = 0.5
+THESHOLDS = 0.27
 
 # 프로젝트 이름
 import time
@@ -340,10 +411,10 @@ MASKS_PATH = 'datasets/train_mask/'
 
 # 가중치 저장 위치
 OUTPUT_DIR = f'datasets/train_output/{save_name}/'
-WORKERS = 20
+WORKERS = 24
 
 # 조기종료
-EARLY_STOP_PATIENCE = 5
+EARLY_STOP_PATIENCE = 10
 
 # 중간 가중치 저장 이름
 CHECKPOINT_PERIOD = 1
@@ -423,8 +494,6 @@ def miou(y_true, y_pred, smooth=1e-6):
     miou = tf.reduce_mean(iou)
     return miou
 
-import tensorflow as tf
-
 def ohem_loss(y_true, y_pred, n_hard_examples=5):
     """
     Online Hard Example Mining (OHEM) 손실 함수.
@@ -458,38 +527,16 @@ def get_mask_arr(path):
     return seg
 
 # Data Augmentation 설정
-# 이미지와 마스크에 동일한 데이터 증강을 적용하기 위한 제너레이터
-def image_mask_generator(image_data_gen, mask_data_gen, images_path, masks_path, batch_size):
-    # 이미지와 마스크 데이터 제너레이터 생성
-    image_generator = image_data_gen.flow_from_directory(
-        'data/images',  # 이미지 폴더 경로
-        classes=[images_path],
-        class_mode=None,
-        color_mode='rgb',
-        target_size=(256, 256),  # 필요에 따라 조정
-        batch_size=batch_size,
-        seed=42)
-    
-    mask_generator = mask_data_gen.flow_from_directory(
-        'data/masks',  # 마스크 폴더 경로
-        classes=[masks_path],
-        class_mode=None,
-        color_mode='grayscale',  # 마스크는 보통 그레이스케일
-        target_size=(256, 256),  # 필요에 따라 조정
-        batch_size=batch_size,
-        seed=42)
-    
-    # 파이썬의 zip을 사용하여 이미지와 마스크 데이터를 동기화
-    while True:
-        x = image_generator.next()
-        y = mask_generator.next()
-        yield x, y
-        
-# 데이터 증강 설정       
-data_gen_args = dict(
-    horizontal_flip=True,
-    vertical_flip=True,
-)
+def get_image_data_gen():
+    #데이터가 이미지 끝부분에 걸쳐있는 경우가 많아 세밀한 조정 필요
+    data_gen_args = dict(
+        horizontal_flip=True,
+        vertical_flip=True,
+    )
+
+    image_datagen = ImageDataGenerator(**data_gen_args)
+    mask_datagen = ImageDataGenerator(**data_gen_args)
+    return image_datagen, mask_datagen
 
 #색채 대비
 def enhance_image_contrast(image):
@@ -504,7 +551,7 @@ def enhance_image_contrast(image):
     l_clahe = clahe.apply(l)
     
     # 밝기조절 - 어둡게
-    l_clahe = np.clip(l_clahe * 1, 0, 255).astype(l.dtype)
+    l_clahe = np.clip(l_clahe * 0.5, 0, 255).astype(l.dtype)
     
     # 채널 합치기 및 색공간 변환
     enhanced_lab = cv2.merge((l_clahe, a, b))
@@ -535,7 +582,7 @@ def generator_from_lists(images_path, masks_path, batch_size=32, shuffle = True,
 
         for img_path, mask_path in zip(images_path, masks_path):
 
-            img = fopen_image(img_path, bands=(7,6,8))
+            img = fopen_image(img_path, bands=(7,6,2))
             mask = fopen_mask(mask_path)
             
             # #대비조절
@@ -574,6 +621,9 @@ test_meta = pd.read_csv('datasets/test_meta.csv')
 if not os.path.exists(OUTPUT_DIR):
     os.makedirs(OUTPUT_DIR)
 
+BACKBONE = 'resnet34'
+preprocess_input = sm.get_preprocessing(BACKBONE)
+
 # train : val = 8 : 2 나누기
 x_tr, x_val = train_test_split(train_meta, test_size=0.2, random_state=RANDOM_STATE)
 print(len(x_tr), len(x_val)) #26860 6715
@@ -589,8 +639,9 @@ train_generator = generator_from_lists(images_train, masks_train, batch_size=BAT
 validation_generator = generator_from_lists(images_validation, masks_validation, batch_size=BATCH_SIZE, random_state=RANDOM_STATE)
 
 # model 불러오기
-model = att_r2_unet(img_w=256, img_h=256, n_label=1)
-model.compile(optimizer = Adam(learning_rate=0.00001), loss = ohem_loss, metrics = ['accuracy', miou])
+# nClasses, input_height=256, input_width=256, n_filters = 16, dropout = 0.1, batchnorm = True, n_channels=10
+model = get_unet_att(nClasses= 1, input_height = IMAGE_SIZE[0], input_width= IMAGE_SIZE[1] , n_filters= N_FILTERS, batchnorm= True, n_channels=N_CHANNELS)
+model.compile(optimizer = Adam(learning_rate=0.001), loss = ohem_loss, metrics = ['accuracy', miou])
 model.summary()
 
 
@@ -599,10 +650,10 @@ es = EarlyStopping(monitor='val_miou', mode='max', verbose=1, patience=EARLY_STO
 checkpoint = ModelCheckpoint(os.path.join(OUTPUT_DIR, CHECKPOINT_MODEL_NAME), monitor='val_miou', verbose=1,
 save_best_only=True, mode='max', period=CHECKPOINT_PERIOD)
 rlr = ReduceLROnPlateau(monitor='val_loss',
-                        patience=4, #early stopping 의 절반
+                        patience=2, #early stopping 의 절반
                         mode = 'auto',
                         verbose= 1,
-                        factor=0.5 #learning rate 를 반으로 줄임.
+                        factor=0.3 #learning rate 를 반으로 줄임.
                         )
 
 print('---model 훈련 시작---')
