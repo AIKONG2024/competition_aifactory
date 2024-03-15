@@ -47,7 +47,7 @@ MAX_PIXEL_VALUE = 65535 # 이미지 정규화를 위한 픽셀 최대값
 N_FILTERS = 32 # 필터수 지정
 N_CHANNELS = 3 # channel 지정
 EPOCHS = 300 # 훈련 epoch 지정
-BATCH_SIZE = 4 # batch size 지정
+BATCH_SIZE = 2 # batch size 지정
 IMAGE_SIZE = (256, 256) # 이미지 크기 지정
 MODEL_NAME = 'unet' # 모델 이름
 INITIAL_EPOCH = 0 # 초기 epoch
@@ -196,14 +196,14 @@ def adjust_brightness(image, factor=1.2):
 
 def add_noise(image):
     mean = 0
-    var = 10
+    var = 1
     sigma = var ** 0.5
     gauss = np.random.normal(mean, sigma, image.shape)
     noisy_image = np.clip(image + gauss, 0, 255).astype(np.uint8)
     return noisy_image
 
 def augment_image(image, mask, IMAGE_SIZE=(256, 256)):
-    per = 0.4
+    per = 0.3
     # 확률적으로 이미지 변환 적용
     if random.random() < per:
         image = np.fliplr(image)
@@ -218,12 +218,12 @@ def augment_image(image, mask, IMAGE_SIZE=(256, 256)):
         image = rotate_image(image, angle)
         mask = rotate_image(mask, angle)
     
-    if random.random() < per:
-        factor = random.uniform(0.9, 1.1)
-        image = adjust_brightness(image, factor=factor)
+    # if random.random() < per:
+    #     factor = random.uniform(0.9, 1.1)
+    #     image = adjust_brightness(image, factor=factor)
     
-    if random.random() < per:
-        image = add_noise(image)
+    # if random.random() < per:
+    #     image = add_noise(image)
     return image, mask
 
 
@@ -748,7 +748,7 @@ class mAP(tf.keras.metrics.AUC):
     def __init__(self, name='mAP', **kwargs):
         super(mAP, self).__init__(name=name, curve='PR', **kwargs)
         
-def ohem_loss(y_true, y_pred, n_hard_examples=20):
+def ohem_loss(y_true, y_pred, n_hard_examples=35):
     """
     Online Hard Example Mining (OHEM) 손실 함수.
     
