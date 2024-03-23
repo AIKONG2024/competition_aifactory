@@ -43,10 +43,10 @@ np.random.seed(RANDOM_STATE)
 
 MAX_PIXEL_VALUE = 65535 # 이미지 정규화를 위한 픽셀 최대값
 
-N_FILTERS = 16 # 필터수 지정
-N_CHANNELS = 3 # channel 지정
-EPOCHS = 200 # 훈련 epoch 지정
-BATCH_SIZE = 15 # batch size 지정
+N_FILTERS = 8 # 필터수 지정
+N_CHANNELS = 5 # channel 지정
+EPOCHS = 300 # 훈련 epoch 지정
+BATCH_SIZE = 5 # batch size 지정
 IMAGE_SIZE = (256, 256) # 이미지 크기 지정
 MODEL_NAME = 'AFD' # 모델 이름
 INITIAL_EPOCH = 0 # 초기 epoch
@@ -130,19 +130,20 @@ def get_img_arr(path):
         nir = src.read(5).astype(float)
         blue = src.read(2).astype(float)
 
-    #AFI
-    afi = swir2 / blue
-    # 정규화
-    swir2 = np.float32(swir2) / MAX_PIXEL_VALUE
-    swir1 = np.float32(swir1)/ MAX_PIXEL_VALUE
-    blue = np.float32(blue)/ MAX_PIXEL_VALUE
-    nir = np.float32(nir) / MAX_PIXEL_VALUE
-    
-    
-    # 배열 생성
-    img = np.stack([swir2, swir1, nir], axis=-1)
-    
+    swir2 = swir2 / MAX_PIXEL_VALUE
+    swir1 = swir1 / MAX_PIXEL_VALUE
+    nir = nir / MAX_PIXEL_VALUE
+    blue = blue / MAX_PIXEL_VALUE
+
+    # AFI
+    afi = np.divide(swir2, blue, out=np.zeros_like(swir2), where=blue!=0)
+    afi_min = np.min(afi)
+    afi_max = np.max(afi)
+    afi = (afi - afi_min) / (afi_max - afi_min)
+
+    img = np.stack([swir2, swir1, nir, blue, afi], axis=-1)
     return img
+
 
 def get_mask_arr(path):
     img = rasterio.open(path).read().transpose((1, 2, 0))
@@ -392,7 +393,7 @@ import segmentation_models as sm
 # model 불러오기
 model = get_AFD(input_height=IMAGE_SIZE[0], input_width=IMAGE_SIZE[1], n_filters=N_FILTERS, n_channels=N_CHANNELS, nClasses=1, dilation_rate=2)
 model.summary()
-model.compile(optimizer = Adam(learning_rate=1e-2), loss=sm.losses.bce_jaccard_loss, metrics = ['accuracy', sm.metrics.iou_score])
+model.compile(optimizer = Adam(learning_rate=1e-3), loss=sm.losses.bce_jaccard_loss, metrics = ['accuracy', sm.metrics.iou_score])
 
 
 # checkpoint 및 조기종료 설정

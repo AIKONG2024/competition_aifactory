@@ -461,10 +461,10 @@ def get_att_unet(nClasses, input_height=256, input_width=256, n_filters = 16, dr
     model = Model(inputs=[input_img], outputs=[outputs])
     return model
 
-from keras.applications import VGG16
+from keras.applications import VGG16, VGG19
 def get_pretrained_unet(nClasses =1 , input_height=256, input_width=256,  n_filters=16, dropout=0.5, batchnorm=True, n_channels=3):
     # Load the VGG16 model, excluding the top classification layer
-    base_model = VGG16(weights='imagenet', include_top=False, input_shape=(input_height, input_width, n_channels))
+    base_model = VGG19(weights='imagenet', include_top=False, input_shape=(input_height, input_width, n_channels))
 
     # Define the inputs
     inputs = base_model.input
@@ -559,7 +559,7 @@ def get__attention_unet(nClasses, input_height=256, input_width=256, n_filters =
 
 def get_pretrained_attention_unet(input_height=256, input_width=256, nClasses=1, n_filters=16, dropout=0.5, batchnorm=True, n_channels=3):
     # Load the VGG16 model, excluding the top classification layer
-    base_model = VGG16(weights='imagenet', include_top=False, input_shape=(input_height, input_width, n_channels))
+    base_model = VGG19(weights='imagenet', include_top=False, input_shape=(input_height, input_width, n_channels))
     
     # Define the inputs
     inputs = base_model.input
@@ -958,15 +958,15 @@ import segmentation_models as sm
 model = get_model(MODEL_NAME, input_height=IMAGE_SIZE[0], input_width=IMAGE_SIZE[1], n_filters=N_FILTERS, n_channels=N_CHANNELS)
 model.summary()
 
-WEIGHT_NAME = "20240315034533/model_unet_20240315034533_final_weights.h5"
+WEIGHT_NAME = "20240315175341\model_pretrained_attention_unet_20240315175341_final_weights.h5"
 model.load_weights(f'datasets/train_output/{WEIGHT_NAME}')
 
-# from sklearn.metrics import jaccard_score
-# thresholds = [0.2, 0.21, 0.22, 0.23, 0.24, 0.25]
+from sklearn.metrics import jaccard_score
+# thresholds = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
 # miou_per_threshold = {threshold: [] for threshold in thresholds}
 # # 임계치마다 100개의 이미지 점수 확인
 # for idx, img_name in enumerate(train_meta['train_img']):
-#     if idx < 10:
+#     if idx < 50:
 #         print(IndexError)
 #         img_path = f'datasets/train_img/{img_name}'
 #         mask_path = img_path.replace('train_img', 'train_mask')
@@ -994,15 +994,16 @@ model.load_weights(f'datasets/train_output/{WEIGHT_NAME}')
 # average_miou_per_threshold = {threshold: np.mean(miou) for threshold, miou in miou_per_threshold.items()}
 # print(average_miou_per_threshold)
 
-# y_pred_dict = {}
+y_pred_dict = {}
 
-# for idx, i in enumerate(test_meta['test_img']):
-#     print(f"[{idx}|{len(test_meta['test_img'])}]") 
-#     img = get_img_arr(f'datasets/test_img/{i}', (7,6,2)) 
-#     y_pred = model.predict(np.array([img]), batch_size=32 ,verbose=0)
-#     y_pred = np.where(y_pred[0, :, :, 0] > 0.21, 1, 0) # 임계값 처리
-#     y_pred = y_pred.astype(np.uint8)
-#     y_pred_dict[i] = y_pred
+for idx, i in enumerate(test_meta['test_img']):
+    print(f"[{idx}|{len(test_meta['test_img'])}]") 
+    img = get_img_arr(f'datasets/test_img/{i}', (7,6,2)) 
+    y_pred = model.predict(np.array([img]), batch_size=32 ,verbose=0)
+    y_pred = np.where(y_pred[0, :, :, 0] > 0.5, 1, 0) # 임계값 처리
+    y_pred = y_pred.astype(np.uint8)
+    y_pred_dict[i] = y_pred
 # name = WEIGHT_NAME.split('/')[1]
-# joblib.dump(y_pred_dict, f'predict/{name}_y_pred.pkl')
-# print("저장된 pkl:", f'predict/{name}_y_pred.pkl')
+joblib.dump(y_pred_dict, f'predict/{MODEL_NAME}_y_pred.pkl')
+print("저장된 pkl:", f'predict/{MODEL_NAME}_y_pred.pkl')
+#임계 0.5 - 0.93 // 제출

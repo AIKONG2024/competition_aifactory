@@ -46,12 +46,12 @@ MAX_PIXEL_VALUE = 65535 # 이미지 정규화를 위한 픽셀 최대값
 
 N_FILTERS = 16 # 필터수 지정
 N_CHANNELS = 3 # channel 지정
-EPOCHS = 300 # 훈련 epoch 지정
-BATCH_SIZE = 16 # batch size 지정
+EPOCHS = 500 # 훈련 epoch 지정
+BATCH_SIZE = 4 # batch size 지정
 IMAGE_SIZE = (256, 256) # 이미지 크기 지정
 MODEL_NAME = 'pretrained_attention_unet_resnet18' # 모델 이름
 INITIAL_EPOCH = 0 # 초기 epoch
-THESHOLDS = 0.21
+THESHOLDS = 0.25
 
 # 프로젝트 이름
 import time
@@ -64,10 +64,10 @@ MASKS_PATH = 'datasets/train_mask/'
 
 # 가중치 저장 위치
 OUTPUT_DIR = f'datasets/train_output/{save_name}/'
-WORKERS = 32
+WORKERS = 60
 
 # 조기종료
-EARLY_STOP_PATIENCE = 15
+EARLY_STOP_PATIENCE = 20
 
 # 중간 가중치 저장 이름
 CHECKPOINT_PERIOD = 1
@@ -96,12 +96,10 @@ class CometLogger(Callback):
     def on_epoch_end(self, epoch, logs={}):
         experiment.log_metrics({
             'epoch': epoch,
-            'loss': logs['loss'],
-            'val_loss': logs['val_loss'],
-            'accuracy': logs['accuracy'],
-            'val_accuracy': logs['val_accuracy'],
-            'iou_score': logs['iou_score'],
-            'val_iou_score': logs['val_iou_score'],
+            'u3_output_final_activation_loss': logs['u3_output_final_activation_loss'],
+            'val_u3_output_final_activation_loss': logs['val_u3_output_final_activation_loss'],
+            'u3_output_final_activation_iou_score': logs['u3_output_final_activation_iou_score'],
+            'val_u3_output_final_activation_iou_score': logs['val_u3_output_final_activation_iou_score']
         })
 
 class threadsafe_iter:
@@ -203,7 +201,7 @@ def add_noise(image):
     return noisy_image
 
 def augment_image(image, mask, IMAGE_SIZE=(256, 256)):
-    per = 0.1
+    per = 0.4
     # 확률적으로 이미지 변환 적용
     if random.random() < per:
         image = np.fliplr(image)
@@ -249,7 +247,7 @@ def enhance_image_contrast(image):
     return enhanced_image
 
 @threadsafe_generator
-def generator_from_lists(images_path, masks_path, batch_size=32, shuffle = True, random_state=None):
+def generator_from_lists(images_path, masks_path, batch_size=32, shuffle = True, random_state=None, is_train = False):
 
     images = []
     masks = []
@@ -274,12 +272,12 @@ def generator_from_lists(images_path, masks_path, batch_size=32, shuffle = True,
             img = fopen_image(img_path, bands=(7,6,2))
             mask = fopen_mask(mask_path)
             
-            # #대비조절
-            # img = np.uint8(img * 255)  # 이미지를 8-bit 정수 타입으로 변환
-            # img = enhance_image_contrast(img)
-            # img = img.astype(np.float32) / 255. #다시 32 float 타입 변환
-            # img, mask = augment_image(img, mask)
-            
+            if is_train:
+                # #대비조절
+                # img = np.uint8(img * 255)  # 이미지를 8-bit 정수 타입으로 변환
+                # img = enhance_image_contrast(img)
+                # img = img.astype(np.float32) / 255. #다시 32 float 타입 변환
+                img, mask = augment_image(img, mask)
             images.append(img)
             masks.append(mask)
 
@@ -287,7 +285,70 @@ def generator_from_lists(images_path, masks_path, batch_size=32, shuffle = True,
                 yield (np.array(images), np.array(masks))
                 images = []
                 masks = []
+                
+                
+            
+################
+#collect
+from keras_unet_collection import models
+from keras_unet_collection import activations
+from keras_unet_collection import losses
+from keras_unet_collection import models, base
+def get_c_unet3plus():
+    # model 불러오기
+    filter_num_down = [32, 64, 128, 256, 512]
+    filter_num_skip = [32, 32, 32, 32]
+    filter_num_aggregate = 160
 
+    stack_num_down = 2
+    stack_num_up = 1
+    n_labels = 1
+    name = 'u3'
+    input_tensor = keras.layers.Input((256, 256, 3))
+    X_decoder = base.unet_3plus_2d_base(
+        input_tensor, filter_num_down, filter_num_skip, filter_num_aggregate, 
+        stack_num_down=stack_num_down, stack_num_up=stack_num_up, activation='ReLU', 
+        batch_norm=True, pool=True, unpool=True, backbone=None, name=name)
+    # allocating deep supervision tensors
+    OUT_stack = []
+    # reverse indexing `X_decoder`, so smaller tensors have larger list indices 
+    X_decoder = X_decoder[::-1]
+
+    # deep supervision outputs
+    for i in range(1, len(X_decoder)):
+        # 3-by-3 conv2d --> upsampling --> sigmoid output activation
+        pool_size = 2**(i)
+        X = Conv2D(n_labels, 3, padding='same', name='{}_output_conv1_{}'.format(name, i-1))(X_decoder[i])
+        
+        X = UpSampling2D((pool_size, pool_size), interpolation='bilinear', 
+                        name='{}_output_sup{}'.format(name, i-1))(X)
+        
+        X = Activation('sigmoid', name='{}_output_sup{}_activation'.format(name, i-1))(X)
+        # collecting deep supervision tensors
+        OUT_stack.append(X)
+
+    # the final output (without extra upsampling)
+    # 3-by-3 conv2d --> sigmoid output activation
+    X = Conv2D(n_labels, 3, padding='same', name='{}_output_final'.format(name))(X_decoder[0])
+    X = Activation('sigmoid', name='{}_output_final_activation'.format(name))(X)
+    # collecting final output tensors
+    OUT_stack.append(X)
+    X_CGM = X_decoder[-1]
+    X_CGM = Dropout(rate=0.1)(X_CGM)
+    X_CGM = Conv2D(filter_num_skip[-1], 1, padding='same')(X_CGM)
+    X_CGM = GlobalMaxPooling2D()(X_CGM)
+    X_CGM = Activation('sigmoid')(X_CGM)
+
+    # CGM_mask = max(X_CGM, axis=-1) # <----- This value could be trained with "none-organ image"
+
+    # for i in range(len(OUT_stack)):
+    #     if i < len(OUT_stack)-1:
+    #         OUT_stack[i] = multiply([OUT_stack[i], X_CGM], name='{}_output_sup{}_CGM'.format(name, i))
+    #     else:
+    #         OUT_stack[i] = multiply([OUT_stack[i], X_CGM], name='{}_output_final_CGM'.format(name))
+    
+    unet3plus = Model(inputs=[input_tensor,], outputs=OUT_stack)
+    return unet3plus
 ###################################################Field################################################
 
 # GPU 설정
@@ -324,30 +385,38 @@ images_validation = [os.path.join(IMAGES_PATH, image) for image in x_val['train_
 masks_validation = [os.path.join(MASKS_PATH, mask) for mask in x_val['train_mask'] ]
 
 
-train_generator = generator_from_lists(images_train, masks_train, batch_size=BATCH_SIZE, random_state=RANDOM_STATE)
+train_generator = generator_from_lists(images_train, masks_train, batch_size=BATCH_SIZE, random_state=RANDOM_STATE, is_train=True)
 validation_generator = generator_from_lists(images_validation, masks_validation, batch_size=BATCH_SIZE, random_state=RANDOM_STATE)
 
-import segmentation_models as sm
-from keras_unet_collection import models
-# model 불러오기
+from keras_unet_collection import losses
 
-model = models.att_unet_2d((IMAGE_SIZE[0], IMAGE_SIZE[1], N_CHANNELS), [N_FILTERS, N_FILTERS*2, N_FILTERS*4, N_FILTERS*8], n_labels=1,
-                           stack_num_down=4, stack_num_up=4,
-                           activation='ReLU', atten_activation='ReLU', attention='add', output_activation='Sigmoid', 
-                           batch_norm=True, pool=True, unpool='bilinear', name='attunet',backbone='ResNet50', weights='imagenet')
-model.compile(optimizer = Adam(learning_rate=0.001), loss =sm.losses.binary_focal_dice_loss, metrics = ['accuracy',  sm.metrics.iou_score])
+def hybrid_loss(y_true, y_pred):
+
+    loss_focal = losses.focal_tversky(y_true, y_pred, alpha=0.5, gamma=4/3)
+    loss_iou = losses.iou_seg(y_true, y_pred)
+    
+    # (x) 
+    loss_ssim = losses.ms_ssim(y_true, y_pred, max_val=1.0, filter_size=4)
+    
+    return loss_focal+loss_iou + loss_ssim
+
+import segmentation_models as sm
+model = get_c_unet3plus()
+model.compile(loss=[sm.losses.bce_dice_loss, sm.losses.bce_dice_loss, sm.losses.bce_dice_loss, sm.losses.bce_dice_loss, sm.losses.bce_dice_loss],
+                  loss_weights=[0.25, 0.25, 0.25, 0.25, 1.0],
+                  optimizer=keras.optimizers.Adam(learning_rate=1e-2), metrics=[sm.metrics.iou_score])
 model.summary()
 
 
 # checkpoint 및 조기종료 설정
-es = EarlyStopping(monitor='val_loss', mode='min', verbose=1, patience=EARLY_STOP_PATIENCE, restore_best_weights=True)
-checkpoint = ModelCheckpoint(os.path.join(OUTPUT_DIR, CHECKPOINT_MODEL_NAME), monitor='val_iou_score', verbose=1,
-save_best_only=True, mode='max', period=CHECKPOINT_PERIOD)
-rlr = ReduceLROnPlateau(monitor='val_iou_score',
-                        patience=7, #early stopping 의 절반
-                        mode = 'max',
+es = EarlyStopping(monitor='val_u3_output_final_activation_loss', mode='min', verbose=1, patience=EARLY_STOP_PATIENCE, restore_best_weights=True)
+checkpoint = ModelCheckpoint(os.path.join(OUTPUT_DIR, CHECKPOINT_MODEL_NAME), monitor='val_u3_output_final_activation_loss', verbose=1,
+save_best_only=True, mode='min', period=CHECKPOINT_PERIOD)
+rlr = ReduceLROnPlateau(monitor='val_u3_output_final_activation_loss',
+                        patience=10, #early stopping 의 절반
+                        mode = 'min',
                         verbose= 1,
-                        factor=0.5 #learning rate 를 반으로 줄임.
+                        factor=0.3 #learning rate 를 반으로 줄임.
                         )
 
 print('---model 훈련 시작---')
@@ -356,7 +425,7 @@ history = model.fit_generator(
     steps_per_epoch=len(images_train) // BATCH_SIZE,
     validation_data=validation_generator,
     validation_steps=len(images_validation) // BATCH_SIZE,
-    callbacks=[checkpoint, es, CometLogger(),rlr],
+    callbacks=[checkpoint, es,rlr,CometLogger()],
     epochs=EPOCHS,
     workers=WORKERS,
     initial_epoch=INITIAL_EPOCH

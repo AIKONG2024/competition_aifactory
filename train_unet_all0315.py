@@ -46,12 +46,12 @@ MAX_PIXEL_VALUE = 65535 # 이미지 정규화를 위한 픽셀 최대값
 
 N_FILTERS = 16 # 필터수 지정
 N_CHANNELS = 3 # channel 지정
-EPOCHS = 300 # 훈련 epoch 지정
-BATCH_SIZE = 16 # batch size 지정
+EPOCHS = 500 # 훈련 epoch 지정
+BATCH_SIZE = 15 # batch size 지정
 IMAGE_SIZE = (256, 256) # 이미지 크기 지정
 MODEL_NAME = 'pretrained_attention_unet' # 모델 이름
 INITIAL_EPOCH = 0 # 초기 epoch
-THESHOLDS = 0.21
+THESHOLDS = 0.25
 
 # 프로젝트 이름
 import time
@@ -67,7 +67,7 @@ OUTPUT_DIR = f'datasets/train_output/{save_name}/'
 WORKERS = 32
 
 # 조기종료
-EARLY_STOP_PATIENCE = 15
+EARLY_STOP_PATIENCE = 25
 
 # 중간 가중치 저장 이름
 CHECKPOINT_PERIOD = 1
@@ -202,28 +202,17 @@ def add_noise(image):
     noisy_image = np.clip(image + gauss, 0, 255).astype(np.uint8)
     return noisy_image
 
-def augment_image(image, mask, IMAGE_SIZE=(256, 256)):
-    per = 0.3
+def augment_image(image, mask, IMAGE_SIZE=(256, 256), per=0.4):
     # 확률적으로 이미지 변환 적용
     if random.random() < per:
         image = np.fliplr(image)
         mask = np.fliplr(mask)
     
     if random.random() < per:
-        image = np.flipud(image)
-        mask = np.flipud(mask)
-    
-    if random.random() < per:
         angle = random.choice([90, 180, 270])
         image = rotate_image(image, angle)
         mask = rotate_image(mask, angle)
     
-    # if random.random() < per:
-    #     factor = random.uniform(0.9, 1.1)
-    #     image = adjust_brightness(image, factor=factor)
-    
-    # if random.random() < per:
-    #     image = add_noise(image)
     return image, mask
 
 
@@ -249,7 +238,7 @@ def enhance_image_contrast(image):
     return enhanced_image
 
 @threadsafe_generator
-def generator_from_lists(images_path, masks_path, batch_size=32, shuffle = True, random_state=None):
+def generator_from_lists(images_path, masks_path, batch_size=32, shuffle = True, random_state=None, is_train = False):
 
     images = []
     masks = []
@@ -271,15 +260,15 @@ def generator_from_lists(images_path, masks_path, batch_size=32, shuffle = True,
 
         for img_path, mask_path in zip(images_path, masks_path):
 
-            img = fopen_image(img_path, bands=(7,6,2))
+            img = fopen_image(img_path, bands=(7,6,5))
             mask = fopen_mask(mask_path)
             
-            # #대비조절
-            # img = np.uint8(img * 255)  # 이미지를 8-bit 정수 타입으로 변환
-            # img = enhance_image_contrast(img)
-            # img = img.astype(np.float32) / 255. #다시 32 float 타입 변환
-            # img, mask = augment_image(img, mask)
-            
+            if is_train:
+                # #대비조절
+                # img = np.uint8(img * 255)  # 이미지를 8-bit 정수 타입으로 변환
+                # img = enhance_image_contrast(img)
+                # img = img.astype(np.float32) / 255. #다시 32 float 타입 변환
+                img, mask = augment_image(img, mask)
             images.append(img)
             masks.append(mask)
 
@@ -557,9 +546,9 @@ def get__attention_unet(nClasses, input_height=256, input_width=256, n_filters =
     model = Model(inputs=[input_img], outputs=[outputs])
     return model
 
-def get_pretrained_attention_unet(input_height=256, input_width=256, nClasses=1, n_filters=16, dropout=0.5, batchnorm=True, n_channels=3):
+def get_pretrained_attention_unet(input_height=256, input_width=256, nClasses=1, n_filters=16, dropout=0.1, batchnorm=True, n_channels=3):
     # Load the VGG16 model, excluding the top classification layer
-    base_model = VGG16(weights='imagenet', include_top=False, input_shape=(input_height, input_width, n_channels))
+    base_model = VGG16(weights='imagenet', include_top=False, input_shape=(input_height, input_width, n_channels), classes=1, classifier_activation='sigmoid' )
     
     # Define the inputs
     inputs = base_model.input
@@ -950,25 +939,26 @@ images_validation = [os.path.join(IMAGES_PATH, image) for image in x_val['train_
 masks_validation = [os.path.join(MASKS_PATH, mask) for mask in x_val['train_mask'] ]
 
 
-train_generator = generator_from_lists(images_train, masks_train, batch_size=BATCH_SIZE, random_state=RANDOM_STATE)
+train_generator = generator_from_lists(images_train, masks_train, batch_size=BATCH_SIZE, random_state=RANDOM_STATE, is_train=True)
 validation_generator = generator_from_lists(images_validation, masks_validation, batch_size=BATCH_SIZE, random_state=RANDOM_STATE)
 
 import segmentation_models as sm
 # model 불러오기
-model = get_model(MODEL_NAME, input_height=IMAGE_SIZE[0], input_width=IMAGE_SIZE[1], n_filters=N_FILTERS, n_channels=N_CHANNELS)
-model.compile(optimizer = Adam(learning_rate=0.001), loss =sm.losses.bce_jaccard_loss, metrics = ['accuracy', dice_coef, sm.metrics.iou_score])
+model = get_model(MODEL_NAME, input_height=IMAGE_SIZE[0], input_width=IMAGE_SIZE[1], n_filters=N_FILTERS, n_channels=N_CHANNELS, nClasses=1)
+model.compile(optimizer = Adam(learning_rate=0.005), loss =sm.losses.bce_jaccard_loss, metrics = ['accuracy', sm.metrics.iou_score])
 model.summary()
 
 
 # checkpoint 및 조기종료 설정
-es = EarlyStopping(monitor='val_iou_score', mode='max', verbose=1, patience=EARLY_STOP_PATIENCE, restore_best_weights=True)
+es = EarlyStopping(monitor='val_loss', mode='min', verbose=1, patience=EARLY_STOP_PATIENCE, restore_best_weights=True)
 checkpoint = ModelCheckpoint(os.path.join(OUTPUT_DIR, CHECKPOINT_MODEL_NAME), monitor='val_iou_score', verbose=1,
 save_best_only=True, mode='max', period=CHECKPOINT_PERIOD)
-rlr = ReduceLROnPlateau(monitor='val_iou_score',
-                        patience=7, #early stopping 의 절반
-                        mode = 'max',
+rlr = ReduceLROnPlateau(monitor='val_loss',
+                        patience=8, #early stopping 의 절반
+                        mode = 'min',
                         verbose= 1,
-                        factor=0.5 #learning rate 를 반으로 줄임.
+                        factor=0.25, #learning rate 를 반으로 줄임.
+                        min_lr=5e-5
                         )
 
 print('---model 훈련 시작---')
@@ -992,10 +982,7 @@ print("저장된 가중치 명: {}".format(model_weights_output))
 y_pred_dict = {}
 
 for idx, i in enumerate(test_meta['test_img']):
-    img = get_img_arr(f'datasets/test_img/{i}', (7,6,8)) 
-    img = np.uint8(img * 255) 
-    img = enhance_image_contrast(img)
-    img = img.astype(np.float32) / 255
+    img = get_img_arr(f'datasets/test_img/{i}', (7,6,5)) 
     y_pred = model.predict(np.array([img]), batch_size=32)
     y_pred = np.where(y_pred[0, :, :, 0] > THESHOLDS, 1, 0) # 임계값 처리
     y_pred = y_pred.astype(np.uint8)

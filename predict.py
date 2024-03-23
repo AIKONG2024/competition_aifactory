@@ -31,8 +31,9 @@ from keras import backend as K
 from sklearn.model_selection import train_test_split
 import joblib
 import time
-from keras.callbacks import Callback
+from keras.callbacks import Callback, ReduceLROnPlateau
 from sklearn.metrics import precision_score, recall_score, precision_recall_curve ,auc
+from skimage.transform import resize
 # import tensorflow_hub as hub
 import cv2
 
@@ -43,12 +44,12 @@ np.random.seed(RANDOM_STATE)
 
 MAX_PIXEL_VALUE = 65535 # 이미지 정규화를 위한 픽셀 최대값
 
-N_FILTERS = 64 # 필터수 지정
+N_FILTERS = 16 # 필터수 지정
 N_CHANNELS = 3 # channel 지정
-EPOCHS = 120 # 훈련 epoch 지정
+EPOCHS = 300 # 훈련 epoch 지정
 BATCH_SIZE = 16 # batch size 지정
 IMAGE_SIZE = (256, 256) # 이미지 크기 지정
-MODEL_NAME = 'unet' # 모델 이름
+MODEL_NAME = 'pretrained_attention_unet' # 모델 이름
 INITIAL_EPOCH = 0 # 초기 epoch
 THESHOLDS = 0.25
 
@@ -63,10 +64,10 @@ MASKS_PATH = 'datasets/train_mask/'
 
 # 가중치 저장 위치
 OUTPUT_DIR = f'datasets/train_output/{save_name}/'
-WORKERS = 15
+WORKERS = 32
 
 # 조기종료
-EARLY_STOP_PATIENCE = 30
+EARLY_STOP_PATIENCE = 15
 
 # 중간 가중치 저장 이름
 CHECKPOINT_PERIOD = 1
@@ -99,18 +100,8 @@ class CometLogger(Callback):
             'val_loss': logs['val_loss'],
             'accuracy': logs['accuracy'],
             'val_accuracy': logs['val_accuracy'],
-            'dice_coef': logs['dice_coef'],
-            'val_dice_coef': logs['val_dice_coef'],
-            'pixel_accuracy': logs['pixel_accuracy'],
-            'val_pixel_accuracy': logs['val_pixel_accuracy'],
-            'miou': logs['miou'],
-            'val_miou': logs['val_miou'],
-            'precision': logs['precision'],
-            'recall': logs['recall'],
-            'val_precision': logs['val_precision'],
-            'val_recall': logs['val_recall'],
-            'mAP': logs['mAP'],
-            'val_mAP': logs['val_mAP']
+            'iou_score': logs['iou_score'],
+            'val_iou_score': logs['val_iou_score'],
         })
 
 class threadsafe_iter:
@@ -138,14 +129,13 @@ def get_img_arr(path, bands):
         img = rasterio.open(path).read(bands).transpose((1, 2, 0))
     else:
         img = rasterio.open(path).read().transpose((1, 2, 0))
-    img = np.float32(img)/MAX_PIXEL_VALUE
+    img = np.float32(img) / MAX_PIXEL_VALUE
     return img
 
 def get_mask_arr(path):
     img = rasterio.open(path).read().transpose((1, 2, 0))
     seg = np.float32(img)
     return seg
-
 # Data Augmentation 설정
 def get_image_data_gen():
     #데이터가 이미지 끝부분에 걸쳐있는 경우가 많아 세밀한 조정 필요
@@ -161,7 +151,7 @@ def get_image_data_gen():
 #색채 대비
 def enhance_image_contrast(image):
     # CLAHE 객체 생성
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
     
     # 이미지를 LAB 색공간으로 변환
     lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
@@ -171,7 +161,75 @@ def enhance_image_contrast(image):
     l_clahe = clahe.apply(l)
     
     # 밝기조절 - 어둡게
-    l_clahe = np.clip(l_clahe * 0.01, 0, 255).astype(l.dtype)
+    l_clahe = np.clip(l_clahe * 0.3, 0, 255).astype(l.dtype)
+    
+    # 채널 합치기 및 색공간 변환
+    enhanced_lab = cv2.merge((l_clahe, a, b))
+    enhanced_image = cv2.cvtColor(enhanced_lab, cv2.COLOR_LAB2BGR)
+    
+    return enhanced_image
+
+def shuffle_lists(images_path, masks_path, random_state=None):
+    if random_state is not None:
+        np.random.seed(random_state)
+    combined = list(zip(images_path, masks_path))
+    np.random.shuffle(combined)
+    shuffled_images_path, shuffled_masks_path = zip(*combined)
+    return list(shuffled_images_path), list(shuffled_masks_path)
+
+def rotate_image(image, angle):
+    height, width = image.shape[:2]
+    rotation_matrix = cv2.getRotationMatrix2D((width/2, height/2), angle, 1)
+    rotated_image = cv2.warpAffine(image, rotation_matrix, (width, height))
+    if len(image.shape) == 2 or image.shape[2] == 1:
+        rotated_image = rotated_image[:, :, np.newaxis]
+    return rotated_image
+
+def adjust_brightness(image, factor=1.2):
+    hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
+    hsv = np.array(hsv, dtype=np.float64)
+    hsv[:, :, 2] = hsv[:, :, 2] * factor
+    hsv[:, :, 2][hsv[:, :, 2] > 255] = 255
+    hsv = np.array(hsv, dtype=np.uint8)
+    image = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
+    return image
+
+def add_noise(image):
+    mean = 0
+    var = 1
+    sigma = var ** 0.5
+    gauss = np.random.normal(mean, sigma, image.shape)
+    noisy_image = np.clip(image + gauss, 0, 255).astype(np.uint8)
+    return noisy_image
+
+def augment_image(image, mask, IMAGE_SIZE=(256, 256), per=0.4):
+    # 확률적으로 이미지 변환 적용
+    if random.random() < per:
+        image = np.fliplr(image)
+        mask = np.fliplr(mask)
+    
+    if random.random() < per:
+        angle = random.choice([90, 180, 270])
+        image = rotate_image(image, angle)
+        mask = rotate_image(mask, angle)
+    
+    return image, mask
+
+
+#색채 대비
+def enhance_image_contrast(image):
+    # CLAHE 객체 생성
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
+    
+    # 이미지를 LAB 색공간으로 변환
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    
+    # L 채널에 CLAHE 적용
+    l_clahe = clahe.apply(l)
+    
+    # 밝기조절 - 어둡게
+    l_clahe = np.clip(l_clahe * 0.9, 0, 255).astype(l.dtype)
     
     # 채널 합치기 및 색공간 변환
     enhanced_lab = cv2.merge((l_clahe, a, b))
@@ -180,7 +238,7 @@ def enhance_image_contrast(image):
     return enhanced_image
 
 @threadsafe_generator
-def generator_from_lists(images_path, masks_path, batch_size=32, shuffle = True, random_state=None):
+def generator_from_lists(images_path, masks_path, batch_size=32, shuffle = True, random_state=None, is_train = False):
 
     images = []
     masks = []
@@ -202,15 +260,15 @@ def generator_from_lists(images_path, masks_path, batch_size=32, shuffle = True,
 
         for img_path, mask_path in zip(images_path, masks_path):
 
-            img = fopen_image(img_path, bands=(7,6,8))
+            img = fopen_image(img_path, bands=(7,6,2))
             mask = fopen_mask(mask_path)
             
-            # #대비조절
-            img = np.uint8(img * 255)  # 이미지를 8-bit 정수 타입으로 변환
-            img = enhance_image_contrast(img)
-            img = img.astype(np.float32) / 255. #다시 32 float 타입 변환
-            
-            
+            if is_train:
+                # #대비조절
+                # img = np.uint8(img * 255)  # 이미지를 8-bit 정수 타입으로 변환
+                # img = enhance_image_contrast(img)
+                # img = img.astype(np.float32) / 255. #다시 32 float 타입 변환
+                img, mask = augment_image(img, mask)
             images.append(img)
             masks.append(mask)
 
@@ -241,23 +299,30 @@ def conv2d_block(input_tensor, n_filters, kernel_size = 3, batchnorm = True):
 
 #Attention Gate
 def attention_gate(F_g, F_l, inter_channel):
-    # F_g: Gating signal from decoder path
-    # F_l: Feature map from encoder path
-    # inter_channel: Number of intermediate channels
-    
-    # Getting the gating signal to the same dimension as the layer from the encoder path
-    F_g_conv = Conv2D(filters=inter_channel, kernel_size=1, strides=1, padding='same')(F_g)
-    F_l_conv = Conv2D(filters=inter_channel, kernel_size=1, strides=1, padding='same')(F_l)
-    
-    # Adding the upsampled gating signal and the feature map
-    F_add = add([F_g_conv, F_l_conv])
-    F_relu = Activation("relu")(F_add)
-    F_attention = Conv2D(filters=1, kernel_size=1, strides=1, padding='same')(F_relu)
-    F_attention = Activation("sigmoid")(F_attention)
-    
-    # Multiplying the attention coefficients with the input feature map
-    F_mul = multiply([F_attention, F_l])
-    return F_mul
+    """
+    An attention gate.
+
+    Arguments:
+    - F_g: Gating signal typically from a coarser scale.
+    - F_l: The feature map from the skip connection.
+    - inter_channel: The number of channels/filters in the intermediate layer.
+    """
+    # Intermediate transformation on the gating signal
+    W_g = Conv2D(inter_channel, kernel_size=1, strides=1, padding='same', kernel_initializer='he_normal')(F_g)
+    W_g = BatchNormalization()(W_g)
+
+    # Intermediate transformation on the skip connection feature map
+    W_x = Conv2D(inter_channel, kernel_size=1, strides=1, padding='same', kernel_initializer='he_normal')(F_l)
+    W_x = BatchNormalization()(W_x)
+
+    # Combine the transformations
+    psi = Activation('relu')(add([W_g, W_x]))
+    psi = Conv2D(1, kernel_size=1, strides=1, padding='same', kernel_initializer='he_normal')(psi)
+    psi = BatchNormalization()(psi)
+    psi = Activation('sigmoid')(psi)
+
+    # Apply the attention coefficients to the feature map from the skip connection
+    return multiply([F_l, psi])
 
 def FCN(nClasses, input_height=128, input_width=128, n_filters = 16, dropout = 0.1, batchnorm = True, n_channels=10 ):
 
@@ -334,7 +399,7 @@ def get_unet_small2 (nClasses, input_height=128, input_width=128, n_filters = 16
     return model
 
 #UNET
-def get_unet(nClasses, input_height=256, input_width=256, n_filters = 16, dropout = 0.1, batchnorm = True, n_channels=10):
+def get_att_unet(nClasses, input_height=256, input_width=256, n_filters = 16, dropout = 0.1, batchnorm = True, n_channels=10):
     input_img = Input(shape=(input_height,input_width, n_channels))
 
     # contracting path
@@ -385,6 +450,52 @@ def get_unet(nClasses, input_height=256, input_width=256, n_filters = 16, dropou
     model = Model(inputs=[input_img], outputs=[outputs])
     return model
 
+from keras.applications import VGG16
+def get_pretrained_unet(nClasses =1 , input_height=256, input_width=256,  n_filters=16, dropout=0.5, batchnorm=True, n_channels=3):
+    # Load the VGG16 model, excluding the top classification layer
+    base_model = VGG16(weights='imagenet', include_top=False, input_shape=(input_height, input_width, n_channels))
+
+    # Define the inputs
+    inputs = base_model.input
+
+    # Use specific layers from the VGG16 model for skip connections
+    s1 = base_model.get_layer("block1_conv2").output
+    s2 = base_model.get_layer("block2_conv2").output
+    s3 = base_model.get_layer("block3_conv3").output
+    s4 = base_model.get_layer("block4_conv3").output
+
+    # The last output of the encoder part
+    b5 = base_model.get_layer("block5_conv3").output
+
+    # Start of the decoder part
+    d6 = Conv2DTranspose(n_filters * 8, (3, 3), strides=(2, 2), padding='same')(b5)
+    d6 = concatenate([d6, s4])
+    d6 = Dropout(dropout)(d6)
+    d6 = conv2d_block(d6, n_filters=n_filters * 8, kernel_size=3, batchnorm=batchnorm)
+
+    d7 = Conv2DTranspose(n_filters * 4, (3, 3), strides=(2, 2), padding='same')(d6)
+    d7 = concatenate([d7, s3])
+    d7 = Dropout(dropout)(d7)
+    d7 = conv2d_block(d7, n_filters=n_filters * 4, kernel_size=3, batchnorm=batchnorm)
+
+    d8 = Conv2DTranspose(n_filters * 2, (3, 3), strides=(2, 2), padding='same')(d7)
+    d8 = concatenate([d8, s2])
+    d8 = Dropout(dropout)(d8)
+    d8 = conv2d_block(d8, n_filters=n_filters * 2, kernel_size=3, batchnorm=batchnorm)
+
+    d9 = Conv2DTranspose(n_filters * 1, (3, 3), strides=(2, 2), padding='same')(d8)
+    d9 = concatenate([d9, s1])
+    d9 = Dropout(dropout)(d9)
+    d9 = conv2d_block(d9, n_filters=n_filters * 1, kernel_size=3, batchnorm=batchnorm)
+
+    # Output layer
+    outputs = Conv2D(nClasses, (1, 1), activation='sigmoid')(d9)
+
+    # Define the model
+    model = Model(inputs=[inputs], outputs=[outputs])
+
+    return model
+
 #UNET With Attention
 def get__attention_unet(nClasses, input_height=256, input_width=256, n_filters = 16, dropout = 0.1, batchnorm = True, n_channels=10):
     input_img = Input(shape=(input_height,input_width, n_channels))
@@ -433,6 +544,41 @@ def get__attention_unet(nClasses, input_height=256, input_width=256, n_filters =
 
     outputs = Conv2D(nClasses, (1, 1), activation='sigmoid') (c9)
     model = Model(inputs=[input_img], outputs=[outputs])
+    return model
+
+def get_pretrained_attention_unet(input_height=256, input_width=256, nClasses=1, n_filters=16, dropout=0.5, batchnorm=True, n_channels=3):
+    # Load the VGG16 model, excluding the top classification layer
+    base_model = VGG16(weights='imagenet', include_top=False, input_shape=(input_height, input_width, n_channels), classes=1, classifier_activation='sigmoid' )
+    
+    # Define the inputs
+    inputs = base_model.input
+    
+    # Use specific layers from the VGG16 model for skip connections
+    s1 = base_model.get_layer("block1_conv2").output
+    s2 = base_model.get_layer("block2_conv2").output
+    s3 = base_model.get_layer("block3_conv3").output
+    s4 = base_model.get_layer("block4_conv3").output
+    bridge = base_model.get_layer("block5_conv3").output
+    
+    # Decoder with attention gates
+    d1 = UpSampling2D((2, 2))(bridge)
+    d1 = concatenate([d1, attention_gate(d1, s4, n_filters*8)])
+    d1 = conv2d_block(d1, n_filters*8, kernel_size=3, batchnorm=batchnorm)
+    
+    d2 = UpSampling2D((2, 2))(d1)
+    d2 = concatenate([d2, attention_gate(d2, s3, n_filters*4)])
+    d2 = conv2d_block(d2, n_filters*4, kernel_size=3, batchnorm=batchnorm)
+    
+    d3 = UpSampling2D((2, 2))(d2)
+    d3 = concatenate([d3, attention_gate(d3, s2, n_filters*2)])
+    d3 = conv2d_block(d3, n_filters*2, kernel_size=3, batchnorm=batchnorm)
+    
+    d4 = UpSampling2D((2, 2))(d3)
+    d4 = concatenate([d4, attention_gate(d4, s1, n_filters)])
+    d4 = conv2d_block(d4, n_filters, kernel_size=3, batchnorm=batchnorm)
+    
+    outputs = Conv2D(1, (1, 1), activation='sigmoid')(d4)
+    model = Model(inputs=[inputs], outputs=[outputs])
     return model
 
 #EFFI_B0
@@ -567,7 +713,7 @@ def get_model(model_name, nClasses=1, input_height=128, input_width=128, n_filte
     elif model_name == 'eb7':
         model = get_efficientunet_b7
     elif model_name == 'unet':
-        model =  get_unet
+        model =  get_att_unet
     elif model_name == 'deeplabv3+':
         model = get_deeplabv3plus
     elif model_name == 'attention_unet':
@@ -578,6 +724,10 @@ def get_model(model_name, nClasses=1, input_height=128, input_width=128, n_filte
         model = get_unet_small1
     elif model_name == 'unet_s2':
         model = get_unet_small2
+    elif model_name == 'pretrained_unet':
+        model = get_pretrained_unet
+    elif model_name == 'pretrained_attention_unet':
+        model = get_pretrained_attention_unet
         
         
     return model(
@@ -679,6 +829,23 @@ class mAP(tf.keras.metrics.AUC):
     def __init__(self, name='mAP', **kwargs):
         super(mAP, self).__init__(name=name, curve='PR', **kwargs)
         
+def ohem_loss(y_true, y_pred, n_hard_examples=20):
+    """
+    Online Hard Example Mining (OHEM) 손실 함수.
+    
+    y_true: 실제 레이블.
+    y_pred: 예측된 확률 또는 레이블.
+    n_hard_examples: 고려할 하드 예제의 수.
+    """
+    # 손실 계산
+    losses = tf.keras.losses.binary_crossentropy(y_true, y_pred)
+    
+    # 손실이 큰 순서로 예제를 선택
+    _, indices = tf.nn.top_k(losses, k=n_hard_examples)
+    
+    # 하드 예제에 대한 손실만 평균하여 반환
+    hard_losses = tf.gather(losses, indices)
+    return tf.reduce_mean(hard_losses)        
 
 
 ###################################################################################
@@ -714,28 +881,114 @@ def show_bands_image(image_path, band = (0,0,0)):
     plt.show()
     return img
 
-MODEL_NAME = 'unet' # 모델 이름
-WEIGHT_NAME = '20240311173420/model_unet_20240311173420_final_weights.h5'
+
+###################################################Field################################################
+
+# GPU 설정
+os.environ["CUDA_VISIBLE_DEVICES"] = str(CUDA_DEVICE)
+try:
+    config = tf.compat.v1.ConfigProto()
+    config.gpu_options.allow_growth = True
+    sess = tf.compat.v1.Session(config=config)
+    K.set_session(sess)
+except:
+    pass
+
+try:
+    np.random.bit_generator = np.random._bit_generator
+except:
+    pass
+
 train_meta = pd.read_csv('datasets/train_meta.csv')
 test_meta = pd.read_csv('datasets/test_meta.csv')
 
+# 저장 폴더 없으면 생성
+if not os.path.exists(OUTPUT_DIR):
+    os.makedirs(OUTPUT_DIR)
+    
+# for i in range(0,1000) :
+#     #데이터 확인
+    # show_band_images(IMAGES_PATH + f'train_img_{i}.tif', MASKS_PATH + f'train_mask_{i}.tif')
+#     show_bands_image(IMAGES_PATH + f'train_img_{i}.tif', (7,6,8))
+
+#대비 확인
+# fig, axs = plt.subplots(3, 4, figsize=(20, 12))
+# axs = axs.ravel()
+# for i in range(10):
+#     img = rasterio.open(IMAGES_PATH + f'train_img_{i}.tif').read([7,6,8]).transpose((1, 2, 0)).astype(np.float32) / MAX_PIXEL_VALUE
+#     img = np.uint8(img * 255)  # 이미지를 8-bit 정수 타입으로 변환
+#     img = enhance_image_contrast(img)
+#     img = img.astype(np.float32) / 255 #다시 32 float 타입 변환
+#     axs[i].imshow(img)
+#     axs[i].set_title(f'Band {i+1}')
+#     axs[i].axis('off')
+# plt.title('enhance_image_contrast')
+# plt.tight_layout()
+# plt.show() 
+
+
+# train : val = 8 : 2 나누기
+x_tr, x_val = train_test_split(train_meta, test_size=0.2, random_state=RANDOM_STATE)
+print(len(x_tr), len(x_val)) #26860 6715
+
+# train : val 지정 및 generator
+images_train = [os.path.join(IMAGES_PATH, image) for image in x_tr['train_img'] ]
+masks_train = [os.path.join(MASKS_PATH, mask) for mask in x_tr['train_mask'] ]
+
+images_validation = [os.path.join(IMAGES_PATH, image) for image in x_val['train_img'] ]
+masks_validation = [os.path.join(MASKS_PATH, mask) for mask in x_val['train_mask'] ]
+
+
+train_generator = generator_from_lists(images_train, masks_train, batch_size=BATCH_SIZE, random_state=RANDOM_STATE, is_train=True)
+validation_generator = generator_from_lists(images_validation, masks_validation, batch_size=BATCH_SIZE, random_state=RANDOM_STATE)
+
+# model 불러오기
+import segmentation_models as sm
 model = get_model(MODEL_NAME, input_height=IMAGE_SIZE[0], input_width=IMAGE_SIZE[1], n_filters=N_FILTERS, n_channels=N_CHANNELS)
-model.compile(optimizer = Adam(), loss = 'binary_crossentropy', metrics = ['accuracy', dice_coef, pixel_accuracy])
 model.summary()
 
+WEIGHT_NAME = "best/best.h5"
 model.load_weights(f'datasets/train_output/{WEIGHT_NAME}')
+
+# from sklearn.metrics import jaccard_score
+# thresholds = [0.1, 0.15, 0.16, 0.17, 0.18, 0.19, 0.2, 0.21, 0.22, 0.23,0.24,0.25]
+# miou_per_threshold = {threshold: [] for threshold in thresholds}
+# # 임계치마다 100개의 이미지 점수 확인
+# for idx, img_name in enumerate(train_meta['train_img']):
+#     if idx < 500:
+#         print(IndexError)
+#         img_path = f'datasets/train_img/{img_name}'
+#         mask_path = img_path.replace('train_img', 'train_mask')
+        
+#         # 이미지 처리 및 모델 예측을 위한 준비 (예시 코드에 따라 필요한 처리를 진행)
+#         img = get_img_arr(img_path, bands=(7,6,2))
+#         img_pred = np.array([img])
+
+#         # 실제 마스크 로드 및 변환
+#         true_mask = get_mask_arr(mask_path).flatten()  # 실제 마스크는 이미 0과 1로 이루어져 있다고 가정
+
+#         for threshold in thresholds:
+#             y_pred = model.predict(img_pred, batch_size=1)
+#             y_pred_thresh = np.where(y_pred[0, :, :, 0] > threshold, 1, 0).flatten()
+            
+#             # 각 임계치에서 IoU 계산
+#             iou = jaccard_score(true_mask, y_pred_thresh, average=None)  # average=None으로 설정하여 각 클래스별 IoU 계산
+#             miou = np.mean(iou)  # 클래스별 IoU의 평균 계산
+#             miou_per_threshold[threshold].append(miou)
+
+# # 각 임계치별 mIoU의 평균 계산 및 출력
+# average_miou_per_threshold = {threshold: np.mean(miou) for threshold, miou in miou_per_threshold.items()}
+# print(average_miou_per_threshold)
+
 y_pred_dict = {}
 
-# for idx, i in enumerate(test_meta['test_img']):
-#     img = get_img_arr(f'datasets/test_img/{i}', (7,6,8)) 
-#     img = np.uint8(img * 255) 
-#     img = enhance_image_contrast(img)
-#     img = img.astype(np.float32) / 255
-#     y_pred = model.predict(np.array([img]), batch_size=1)
-#     y_pred = np.where(y_pred[0, :, :, 0] > THESHOLDS, 1, 0) # 임계값 처리
-#     y_pred = y_pred.astype(np.uint8)
-#     y_pred_dict[i] = y_pred
-
-# model_name = WEIGHT_NAME.split('/')[1]
-# joblib.dump(y_pred_dict, f'predict/{model_name}_y_pred.pkl')
-# print("저장된 pkl:", f'predict/{model_name}_y_pred.pkl')
+for idx, i in enumerate(test_meta['test_img']):
+    print(f"[{idx}|{len(test_meta['test_img'])}]") 
+    img = get_img_arr(f'datasets/test_img/{i}', (7,6,2)) 
+    y_pred = model.predict(np.array([img]), batch_size=32 ,verbose=0)
+    y_pred = np.where(y_pred[0, :, :, 0] > 0.5, 1, 0) # 임계값 처리
+    y_pred = y_pred.astype(np.uint8)
+    y_pred_dict[i] = y_pred
+name = WEIGHT_NAME.split('/')[1]
+joblib.dump(y_pred_dict, f'predict/{name}_y_pred.pkl')
+print("저장된 pkl:", f'predict/{name}_y_pred.pkl')

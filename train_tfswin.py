@@ -11,7 +11,7 @@ import tensorflow as tf
 import keras
 from keras.optimizers import *
 from keras.callbacks import ModelCheckpoint, EarlyStopping
-from keras.applications import EfficientNetB0,EfficientNetB2, EfficientNetB7
+from keras.applications import EfficientNetB0,EfficientNetB2,EfficientNetB3, EfficientNetB7
 from tensorflow.python.keras import backend as K
 import sys
 import pandas as pd
@@ -34,9 +34,9 @@ import time
 from keras.callbacks import Callback, ReduceLROnPlateau
 from sklearn.metrics import precision_score, recall_score, precision_recall_curve ,auc
 from skimage.transform import resize
-import segmentation_models as sm
 # import tensorflow_hub as hub
 import cv2
+from tfswin import SwinTransformerTiny224
 
 #랜럼시드 고정
 RANDOM_STATE = 42 # seed 고정
@@ -48,9 +48,9 @@ MAX_PIXEL_VALUE = 65535 # 이미지 정규화를 위한 픽셀 최대값
 N_FILTERS = 16 # 필터수 지정
 N_CHANNELS = 3 # channel 지정
 EPOCHS = 300 # 훈련 epoch 지정
-BATCH_SIZE = 2 # batch size 지정
+BATCH_SIZE = 16 # batch size 지정
 IMAGE_SIZE = (256, 256) # 이미지 크기 지정
-MODEL_NAME = 'pret_att_unet' # 모델 이름
+MODEL_NAME = 'tfswin' # 모델 이름
 INITIAL_EPOCH = 0 # 초기 epoch
 THESHOLDS = 0.25
 
@@ -68,14 +68,14 @@ OUTPUT_DIR = f'datasets/train_output/{save_name}/'
 WORKERS = 32
 
 # 조기종료
-EARLY_STOP_PATIENCE = 20
+EARLY_STOP_PATIENCE = 15
 
 # 중간 가중치 저장 이름
 CHECKPOINT_PERIOD = 1
-CHECKPOINT_MODEL_NAME = 'checkpoint-{}-{}-epoch_{{epoch:02d}}.hdf5'.format(MODEL_NAME, save_name)
+CHECKPOINT_MODEL_NAME = 'checkpoint-{}-{}-epoch_{{epoch:02d}}.keras'.format(MODEL_NAME, save_name)
 
 # 최종 가중치 저장 이름
-FINAL_WEIGHTS_OUTPUT = 'model_{}_{}_final_weights.h5'.format(MODEL_NAME, save_name)
+FINAL_WEIGHTS_OUTPUT = 'model_{}_{}_final_weights.keras'.format(MODEL_NAME, save_name)
 
 # 사용할 GPU 이름
 CUDA_DEVICE = 0
@@ -148,7 +148,28 @@ def get_image_data_gen():
     image_datagen = ImageDataGenerator(**data_gen_args)
     mask_datagen = ImageDataGenerator(**data_gen_args)
     return image_datagen, mask_datagen
+
+#색채 대비
+def enhance_image_contrast(image):
+    # CLAHE 객체 생성
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
     
+    # 이미지를 LAB 색공간으로 변환
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    
+    # L 채널에 CLAHE 적용
+    l_clahe = clahe.apply(l)
+    
+    # 밝기조절 - 어둡게
+    l_clahe = np.clip(l_clahe * 0.3, 0, 255).astype(l.dtype)
+    
+    # 채널 합치기 및 색공간 변환
+    enhanced_lab = cv2.merge((l_clahe, a, b))
+    enhanced_image = cv2.cvtColor(enhanced_lab, cv2.COLOR_LAB2BGR)
+    
+    return enhanced_image
+
 def shuffle_lists(images_path, masks_path, random_state=None):
     if random_state is not None:
         np.random.seed(random_state)
@@ -182,18 +203,51 @@ def add_noise(image):
     noisy_image = np.clip(image + gauss, 0, 255).astype(np.uint8)
     return noisy_image
 
-def augment_image(image, mask, IMAGE_SIZE=(256, 256), per=0.4):
+def augment_image(image, mask, IMAGE_SIZE=(256, 256)):
+    per = 0.4
     # 확률적으로 이미지 변환 적용
     if random.random() < per:
         image = np.fliplr(image)
         mask = np.fliplr(mask)
     
     if random.random() < per:
+        image = np.flipud(image)
+        mask = np.flipud(mask)
+    
+    if random.random() < per:
         angle = random.choice([90, 180, 270])
         image = rotate_image(image, angle)
         mask = rotate_image(mask, angle)
     
+    # if random.random() < per:
+    #     factor = random.uniform(0.9, 1.1)
+    #     image = adjust_brightness(image, factor=factor)
+    
+    # if random.random() < per:
+    #     image = add_noise(image)
     return image, mask
+
+
+#색채 대비
+def enhance_image_contrast(image):
+    # CLAHE 객체 생성
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
+    
+    # 이미지를 LAB 색공간으로 변환
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    
+    # L 채널에 CLAHE 적용
+    l_clahe = clahe.apply(l)
+    
+    # 밝기조절 - 어둡게
+    l_clahe = np.clip(l_clahe * 0.9, 0, 255).astype(l.dtype)
+    
+    # 채널 합치기 및 색공간 변환
+    enhanced_lab = cv2.merge((l_clahe, a, b))
+    enhanced_image = cv2.cvtColor(enhanced_lab, cv2.COLOR_LAB2BGR)
+    
+    return enhanced_image
 
 @threadsafe_generator
 def generator_from_lists(images_path, masks_path, batch_size=32, shuffle = True, random_state=None, is_train = False):
@@ -222,6 +276,10 @@ def generator_from_lists(images_path, masks_path, batch_size=32, shuffle = True,
             mask = fopen_mask(mask_path)
             
             if is_train:
+                # #대비조절
+                # img = np.uint8(img * 255)  # 이미지를 8-bit 정수 타입으로 변환
+                # img = enhance_image_contrast(img)
+                # img = img.astype(np.float32) / 255. #다시 32 float 타입 변환
                 img, mask = augment_image(img, mask)
             images.append(img)
             masks.append(mask)
@@ -231,110 +289,8 @@ def generator_from_lists(images_path, masks_path, batch_size=32, shuffle = True,
                 images = []
                 masks = []
 
+###################################################Field################################################
 
-
-###########################################################################
-
-from keras.layers import Layer
-import keras.backend as K
-class SwishActivation(Layer):
-    def __init__(self, **kwargs):
-        super(SwishActivation, self).__init__(**kwargs)
-
-    def call(self, inputs):
-        return inputs * K.sigmoid(inputs)
-
-    def get_config(self):
-        config = super().get_config()
-        return config
-    
-# conv_block 함수 내에서 SwishActivation을 사용하는 방법
-from keras.layers import Add, Conv2D, BatchNormalization, ReLU
-
-
-def conv_block(X, filters, block):
-    # Residual block with dilated convolutions
-    # Add skip connection at last after doing convolution operation to input X
-
-    b = 'block_' + str(block) + '_'
-    f1, f2, f3 = filters
-    X_skip = X
-    # block_a
-    X = Conv2D(filters=f1, kernel_size=(1, 1), dilation_rate=(1, 1),
-               padding='same', kernel_initializer='he_normal', name=b + 'a')(X)
-    X = BatchNormalization(name=b + 'batch_norm_a')(X)
-    X = SwishActivation(name=b + 'swish_activation_a')(X)
-    # block_b
-    X = Conv2D(filters=f2, kernel_size=(3, 3), dilation_rate=(2, 2),
-               padding='same', kernel_initializer='he_normal', name=b + 'b')(X)
-    X = BatchNormalization(name=b + 'batch_norm_b')(X)
-    X = SwishActivation(name=b + 'swish_activation_b')(X)
-    # block_c
-    X = Conv2D(filters=f3, kernel_size=(1, 1), dilation_rate=(1, 1),
-               padding='same', kernel_initializer='he_normal', name=b + 'c')(X)
-    X = BatchNormalization(name=b + 'batch_norm_c')(X)
-    # skip_conv
-    X_skip = Conv2D(filters=f3, kernel_size=(3, 3), padding='same', name=b + 'skip_conv')(X_skip)
-    X_skip = BatchNormalization(name=b + 'batch_norm_skip_conv')(X_skip)
-    # block_c + skip_conv
-    X = Add(name=b + 'add')([X, X_skip])
-    X = ReLU(name=b + 'relu')(X)
-    return X
-    
-def base_feature_maps(input_layer):
-    # base covolution module to get input image feature maps 
-    # block_1
-    base = conv_block(input_layer,[N_FILTERS * 2,N_FILTERS * 2,N_FILTERS*4],'1')
-    # block_2
-    base = conv_block(base,[N_FILTERS*4,N_FILTERS*4,N_FILTERS*8],'2')
-    # block_3
-    base = conv_block(base,[N_FILTERS*8,N_FILTERS*8,N_FILTERS*16],'3')
-    return base
-
-def pyramid_feature_maps(input_layer):
-    # pyramid pooling module
-    
-    base = base_feature_maps(input_layer)
-    # red
-    red = GlobalAveragePooling2D(name='red_pool')(base)
-    red = tf.keras.layers.Reshape((1,1,256))(red)
-    red = Convolution2D(filters=32,kernel_size=(1,1),name='red_1_by_1')(red)
-    red = UpSampling2D(size=256,interpolation='bilinear',name='red_upsampling')(red)
-    # yellow
-    yellow = AveragePooling2D(pool_size=(2,2),name='yellow_pool')(base)
-    yellow = Convolution2D(filters=32,kernel_size=(1,1),name='yellow_1_by_1')(yellow)
-    yellow = UpSampling2D(size=2,interpolation='bilinear',name='yellow_upsampling')(yellow)
-    # blue
-    blue = AveragePooling2D(pool_size=(4,4),name='blue_pool')(base)
-    blue = Convolution2D(filters=32,kernel_size=(1,1),name='blue_1_by_1')(blue)
-    blue = UpSampling2D(size=4,interpolation='bilinear',name='blue_upsampling')(blue)
-    
-    # base + red + yellow + blue + green
-    return tf.keras.layers.concatenate([base,red,yellow,blue])
-
-def last_conv_module(input_layer):
-    X = pyramid_feature_maps(input_layer)
-    X = Convolution2D(filters=1,kernel_size=3,padding='same',name='last_conv_3_by_3')(X)
-    X = BatchNormalization(name='last_conv_3_by_3_batch_norm')(X)
-    X = Activation('sigmoid',name='last_conv_sigmoid')(X)
-    # X = tf.keras.layers.Flatten(name='last_conv_flatten')(X)
-    return X
-
-def build_model(input_shape):
-    # Input layer
-    input_layer = Input(shape=input_shape)
-
-    # Constructing the model
-    last_layer = last_conv_module(input_layer)
-
-    # Creating the model
-    model = Model(inputs=input_layer, outputs=last_layer)
-
-    return model
-
-input_shape = (256, 256, 3)  # Replace height, width, and channels with actual values
-        
-##########################################################################
 # GPU 설정
 os.environ["CUDA_VISIBLE_DEVICES"] = str(CUDA_DEVICE)
 try:
@@ -356,7 +312,6 @@ test_meta = pd.read_csv('datasets/test_meta.csv')
 # 저장 폴더 없으면 생성
 if not os.path.exists(OUTPUT_DIR):
     os.makedirs(OUTPUT_DIR)
-    
 
 # train : val = 8 : 2 나누기
 x_tr, x_val = train_test_split(train_meta, test_size=0.2, random_state=RANDOM_STATE)
@@ -370,38 +325,47 @@ images_validation = [os.path.join(IMAGES_PATH, image) for image in x_val['train_
 masks_validation = [os.path.join(MASKS_PATH, mask) for mask in x_val['train_mask'] ]
 
 
-train_generator = generator_from_lists(images_train, masks_train, batch_size=BATCH_SIZE, random_state=RANDOM_STATE, is_train= True)
+train_generator = generator_from_lists(images_train, masks_train, batch_size=BATCH_SIZE, random_state=RANDOM_STATE,is_train= True)
 validation_generator = generator_from_lists(images_validation, masks_validation, batch_size=BATCH_SIZE, random_state=RANDOM_STATE)
 
-optimizer = keras.optimizers.Adam(learning_rate=1e-1)
-model = build_model((IMAGE_SIZE[0],IMAGE_SIZE[1],N_CHANNELS))
-model.compile(optimizer = optimizer, loss =sm.losses.bce_jaccard_loss, metrics = ['accuracy', sm.metrics.iou_score])
-model.summary()
 
+# model 불러오기
+
+from tf_keras import layers, models
+from tfswin import SwinTransformerV2Tiny256
+
+inputs = layers.Input(shape=(256, 256, 3), dtype='uint8')
+outputs = SwinTransformerV2Tiny256(include_top=False)(inputs)
+layers.Dense(1, activation='relu')()
+outputs = layers.Dense(1, activation='sigmoid')(outputs)
+
+model = models.Model(inputs=inputs, outputs=outputs)
+model.compile(optimizer= 'adam', loss ='binary_crossentropy', metrics = ['accuracy'])
+model.summary()
 
 # checkpoint 및 조기종료 설정
 es = EarlyStopping(monitor='val_loss', mode='min', verbose=1, patience=EARLY_STOP_PATIENCE, restore_best_weights=True)
 checkpoint = ModelCheckpoint(os.path.join(OUTPUT_DIR, CHECKPOINT_MODEL_NAME), monitor='val_loss', verbose=1,
-save_best_only=True, mode='min', period=CHECKPOINT_PERIOD)
+save_best_only=True, mode='min')
 rlr = ReduceLROnPlateau(monitor='val_loss',
-                        patience=3, 
+                        patience=7, #early stopping 의 절반
                         mode = 'min',
                         verbose= 1,
-                        factor=0.1, 
-                        min_lr = 8e-4
+                        factor=0.5 #learning rate 를 반으로 줄임.
                         )
 
 print('---model 훈련 시작---')
-history = model.fit_generator(
+history = model.fit(
     train_generator,
     steps_per_epoch=len(images_train) // BATCH_SIZE,
     validation_data=validation_generator,
     validation_steps=len(images_validation) // BATCH_SIZE,
-    callbacks=[checkpoint, es, CometLogger(),rlr],
+    # callbacks=[checkpoint, es, CometLogger(),rlr],
     epochs=EPOCHS,
     workers=WORKERS,
     initial_epoch=INITIAL_EPOCH
 )
+
 print('---model 훈련 종료---')
 
 

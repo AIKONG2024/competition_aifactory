@@ -137,10 +137,10 @@ def get_img_arr(path):
     # 각 밴드를 MAX_PIXEL_VALUE로 나누어 정규화
     swir2_norm = np.float32(swir2) / MAX_PIXEL_VALUE
     nir_norm = np.float32(nir) / MAX_PIXEL_VALUE
-    afi_norm = np.float32(afi) / MAX_PIXEL_VALUE
+    # afi_norm = np.float32(afi) / MAX_PIXEL_VALUE
     
     # 밴드 7, 밴드 5, 그리고 AFI를 포함하는 배열 생성
-    img = np.stack([swir2_norm, nir_norm, afi_norm], axis=-1)
+    img = np.stack([swir2_norm, nir_norm, afi], axis=-1)
     
     return img
 

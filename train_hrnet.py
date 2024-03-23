@@ -47,11 +47,11 @@ MAX_PIXEL_VALUE = 65535 # 이미지 정규화를 위한 픽셀 최대값
 N_FILTERS = 16 # 필터수 지정
 N_CHANNELS = 3 # channel 지정
 EPOCHS = 300 # 훈련 epoch 지정
-BATCH_SIZE = 16 # batch size 지정
+BATCH_SIZE = 8 # batch size 지정
 IMAGE_SIZE = (256, 256) # 이미지 크기 지정
 MODEL_NAME = 'pretrained_attention_unet' # 모델 이름
 INITIAL_EPOCH = 0 # 초기 epoch
-THESHOLDS = 0.21
+THESHOLDS = 0.25
 
 # 프로젝트 이름
 import time
@@ -202,28 +202,17 @@ def add_noise(image):
     noisy_image = np.clip(image + gauss, 0, 255).astype(np.uint8)
     return noisy_image
 
-def augment_image(image, mask, IMAGE_SIZE=(256, 256)):
-    per = 0.3
+def augment_image(image, mask, IMAGE_SIZE=(256, 256), per=0.4):
     # 확률적으로 이미지 변환 적용
     if random.random() < per:
         image = np.fliplr(image)
         mask = np.fliplr(mask)
     
     if random.random() < per:
-        image = np.flipud(image)
-        mask = np.flipud(mask)
-    
-    if random.random() < per:
         angle = random.choice([90, 180, 270])
         image = rotate_image(image, angle)
         mask = rotate_image(mask, angle)
     
-    # if random.random() < per:
-    #     factor = random.uniform(0.9, 1.1)
-    #     image = adjust_brightness(image, factor=factor)
-    
-    # if random.random() < per:
-    #     image = add_noise(image)
     return image, mask
 
 
@@ -249,7 +238,7 @@ def enhance_image_contrast(image):
     return enhanced_image
 
 @threadsafe_generator
-def generator_from_lists(images_path, masks_path, batch_size=32, shuffle = True, random_state=None):
+def generator_from_lists(images_path, masks_path, batch_size=32, shuffle = True, random_state=None, is_train = False):
 
     images = []
     masks = []
@@ -274,12 +263,12 @@ def generator_from_lists(images_path, masks_path, batch_size=32, shuffle = True,
             img = fopen_image(img_path, bands=(7,6,2))
             mask = fopen_mask(mask_path)
             
-            # #대비조절
-            # img = np.uint8(img * 255)  # 이미지를 8-bit 정수 타입으로 변환
-            # img = enhance_image_contrast(img)
-            # img = img.astype(np.float32) / 255. #다시 32 float 타입 변환
-            # img, mask = augment_image(img, mask)
-            
+            if is_train:
+                # #대비조절
+                # img = np.uint8(img * 255)  # 이미지를 8-bit 정수 타입으로 변환
+                # img = enhance_image_contrast(img)
+                # img = img.astype(np.float32) / 255. #다시 32 float 타입 변환
+                img, mask = augment_image(img, mask)
             images.append(img)
             masks.append(mask)
 
@@ -950,59 +939,58 @@ images_validation = [os.path.join(IMAGES_PATH, image) for image in x_val['train_
 masks_validation = [os.path.join(MASKS_PATH, mask) for mask in x_val['train_mask'] ]
 
 
-train_generator = generator_from_lists(images_train, masks_train, batch_size=BATCH_SIZE, random_state=RANDOM_STATE)
+train_generator = generator_from_lists(images_train, masks_train, batch_size=BATCH_SIZE, random_state=RANDOM_STATE, is_train=True)
 validation_generator = generator_from_lists(images_validation, masks_validation, batch_size=BATCH_SIZE, random_state=RANDOM_STATE)
 
-# model 불러오기
 import segmentation_models as sm
-model = get_model(MODEL_NAME, input_height=IMAGE_SIZE[0], input_width=IMAGE_SIZE[1], n_filters=N_FILTERS, n_channels=N_CHANNELS)
+from seg_hrnet_m import seg_hrnet
+# model 불러오기
+model = seg_hrnet(BATCH_SIZE, IMAGE_SIZE[0], IMAGE_SIZE[1], N_CHANNELS, 1)
+# model = get_model(MODEL_NAME, input_height=IMAGE_SIZE[0], input_width=IMAGE_SIZE[1], n_filters=N_FILTERS, n_channels=N_CHANNELS)
+model.compile(optimizer = Adam(learning_rate=0.001), loss =sm.losses.bce_jaccard_loss, metrics = ['accuracy', dice_coef, sm.metrics.iou_score])
 model.summary()
 
-WEIGHT_NAME = "20240315034533/model_unet_20240315034533_final_weights.h5"
-model.load_weights(f'datasets/train_output/{WEIGHT_NAME}')
 
-# from sklearn.metrics import jaccard_score
-# thresholds = [0.2, 0.21, 0.22, 0.23, 0.24, 0.25]
-# miou_per_threshold = {threshold: [] for threshold in thresholds}
-# # 임계치마다 100개의 이미지 점수 확인
-# for idx, img_name in enumerate(train_meta['train_img']):
-#     if idx < 10:
-#         print(IndexError)
-#         img_path = f'datasets/train_img/{img_name}'
-#         mask_path = img_path.replace('train_img', 'train_mask')
-        
-#         # 이미지 처리 및 모델 예측을 위한 준비 (예시 코드에 따라 필요한 처리를 진행)
-#         img = get_img_arr(img_path, bands=(7,6,2))
-#         # img = np.uint8(img * 255)
-#         # img = enhance_image_contrast(img)
-#         # img = img.astype(np.float32) / 255
-#         img_pred = np.array([img])
 
-#         # 실제 마스크 로드 및 변환
-#         true_mask = get_mask_arr(mask_path).flatten()  # 실제 마스크는 이미 0과 1로 이루어져 있다고 가정
+# checkpoint 및 조기종료 설정
+es = EarlyStopping(monitor='val_iou_score', mode='max', verbose=1, patience=EARLY_STOP_PATIENCE, restore_best_weights=True)
+checkpoint = ModelCheckpoint(os.path.join(OUTPUT_DIR, CHECKPOINT_MODEL_NAME), monitor='val_iou_score', verbose=1,
+save_best_only=True, mode='max', period=CHECKPOINT_PERIOD)
+# checkpoint = ParallelModelCheckpoint(model, os.path.join(OUTPUT_DIR, CHECKPOINT_MODEL_NAME), monitor='val_iou_score', mode='max', verbose=1, save_best_only=True, period=CHECKPOINT_PERIOD)
 
-#         for threshold in thresholds:
-#             y_pred = model.predict(img_pred, batch_size=1)
-#             y_pred_thresh = np.where(y_pred[0, :, :, 0] > threshold, 1, 0).flatten()
-            
-#             # 각 임계치에서 IoU 계산
-#             iou = jaccard_score(true_mask, y_pred_thresh, average=None)  # average=None으로 설정하여 각 클래스별 IoU 계산
-#             miou = np.mean(iou)  # 클래스별 IoU의 평균 계산
-#             miou_per_threshold[threshold].append(miou)
+rlr = ReduceLROnPlateau(monitor='val_iou_score',
+                        patience=2, #early stopping 의 절반
+                        mode = 'max',
+                        verbose= 1,
+                        factor=0.1 #learning rate 를 반으로 줄임.
+                        )
 
-# # 각 임계치별 mIoU의 평균 계산 및 출력
-# average_miou_per_threshold = {threshold: np.mean(miou) for threshold, miou in miou_per_threshold.items()}
-# print(average_miou_per_threshold)
+print('---model 훈련 시작---')
+history = model.fit_generator(
+    train_generator,
+    steps_per_epoch=len(images_train) // BATCH_SIZE,
+    validation_data=validation_generator,
+    validation_steps=len(images_validation) // BATCH_SIZE,
+    callbacks=[checkpoint, es, CometLogger(),rlr],
+    epochs=EPOCHS,
+    workers=WORKERS,
+    initial_epoch=INITIAL_EPOCH
+)
+print('---model 훈련 종료---')
 
-# y_pred_dict = {}
 
-# for idx, i in enumerate(test_meta['test_img']):
-#     print(f"[{idx}|{len(test_meta['test_img'])}]") 
-#     img = get_img_arr(f'datasets/test_img/{i}', (7,6,2)) 
-#     y_pred = model.predict(np.array([img]), batch_size=32 ,verbose=0)
-#     y_pred = np.where(y_pred[0, :, :, 0] > 0.21, 1, 0) # 임계값 처리
-#     y_pred = y_pred.astype(np.uint8)
-#     y_pred_dict[i] = y_pred
-# name = WEIGHT_NAME.split('/')[1]
-# joblib.dump(y_pred_dict, f'predict/{name}_y_pred.pkl')
-# print("저장된 pkl:", f'predict/{name}_y_pred.pkl')
+print('가중치 저장')
+model_weights_output = os.path.join(OUTPUT_DIR, FINAL_WEIGHTS_OUTPUT)
+model.save_weights(model_weights_output)
+print("저장된 가중치 명: {}".format(model_weights_output))
+y_pred_dict = {}
+
+for idx, i in enumerate(test_meta['test_img']):
+    img = get_img_arr(f'datasets/test_img/{i}', (7,6,2)) 
+    y_pred = model.predict(np.array([img]), batch_size=32)
+    y_pred = np.where(y_pred[0, :, :, 0] > THESHOLDS, 1, 0) # 임계값 처리
+    y_pred = y_pred.astype(np.uint8)
+    y_pred_dict[i] = y_pred
+    
+joblib.dump(y_pred_dict, f'predict/{MODEL_NAME}_{save_name}_y_pred.pkl')
+print("저장된 pkl:", f'predict/{MODEL_NAME}_{save_name}_y_pred.pkl')
